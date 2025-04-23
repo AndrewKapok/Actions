@@ -11,15 +11,14 @@ jobs:
     steps:
       - name: Checkout current repo
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false  # 禁用默认凭证
 
       - name: Get latest Nginx release ZIP
         id: get-release
         run: |
-          # 获取最新 Release 信息
           API_URL="https://api.github.com/repos/nginx/nginx/releases/latest"
           RESPONSE=$(curl -sL $API_URL)
-          
-          # 提取 ZIP 包的下载链接
           ZIP_URL=$(echo "$RESPONSE" | grep -m1 "browser_download_url.*\.zip" | cut -d '"' -f 4)
           echo "ZIP_URL=$ZIP_URL" >> $GITHUB_OUTPUT
 
@@ -30,12 +29,13 @@ jobs:
       - name: Extract ZIP to nginx/ directory
         run: |
           unzip -o nginx-latest.zip -d nginx/
-          rm nginx-latest.zip  # 清理压缩包
+          rm nginx-latest.zip
 
-      - name: Commit changes (可选)
+      - name: Commit changes
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           git add nginx/
           git commit -m "Update Nginx from release"
-          git push
+          # 使用 GITHUB_TOKEN 认证推送
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git HEAD:main
