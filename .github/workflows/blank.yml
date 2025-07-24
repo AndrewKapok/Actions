@@ -1,0 +1,24 @@
+name: download-youtube-direct
+
+on:
+  workflow_dispatch:        # 允许手动触发
+  # 也可改成 push / schedule 等
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download video
+        run: |
+          mkdir -p dist
+          curl -L \
+            -H "User-Agent: Mozilla/5.0" \
+            -H "Referer: https://www.youtube.com/" \
+            "https://rr2---sn-n4v7snee.googlevideo.com/videoplayback?expire=1753341996&ei=zIuBaJbeBMGpsfIPv8qwuAY&ip=170.106.168.91&id=o-AOanaO4McjZysSiac_mdUmTIJUawNpSkm-qFK3tojvqN&itag=18&source=youtube&requiressl=yes&xpc=EgVo2aDSNQ%3D%3D&met=1753320396%2C&mh=eJ&mm=31%2C29&mn=sn-n4v7snee%2Csn-o097znzk&ms=au%2Crdu&mv=m&mvi=2&pl=21&rms=au%2Cau&gcr=us&initcwndbps=1162500&siu=1&bui=AY1jyLOki7npcMt7c01OIDhzXKNFYdxnRPQ1WK51sCfwEWTLkNZZ3ElPF7YMAAHaYdo17zp6mg&vprv=1&svpuc=1&mime=video%2Fmp4&ns=FNYRwogo6aTp65KvZrZ6PIMQ&rqh=1&cnr=14&ratebypass=yes&dur=3108.617&lmt=1749962164836419&mt=1753319815&fvip=5&lmw=1&fexp=51543008&c=TVHTML5&sefc=1&txp=5318224&n=XsoCuUKlEm0zag&sparams=expire%2Cei%2Cip%2Cid%2Citag%2Csource%2Crequiressl%2Cxpc%2Cgcr%2Csiu%2Cbui%2Cvprv%2Csvpuc%2Cmime%2Cns%2Crqh%2Ccnr%2Cratebypass%2Cdur%2Clmt&lsparams=met%2Cmh%2Cmm%2Cmn%2Cms%2Cmv%2Cmvi%2Cpl%2Crms%2Cinitcwndbps&lsig=APaTxxMwRgIhAKzuqexH4c1e8s5fRC3-aZuDPvmXopDO5Jp3Bi4HJ7qvAiEA--y0CF2hp-xWVuUpFjL4onec7_v508EhldI_uhlp28I%3D&sig=AJfQdSswRQIgWFVKpoOG5Jdbx8rmWzJHYHVOj6mbaUuRQZAnLZ-U1EMCIQDZEri-Gf_MALeFcYNv5BHddEf-PW5m76_reuc7hmqPpw%3D%3D" \
+            -o dist/video.mp4
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: downloaded-video
+          path: dist/video.mp4
