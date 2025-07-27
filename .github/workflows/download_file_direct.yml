@@ -1,14 +1,13 @@
-name: download-youtube-direct
+name: download-file
 
 on:
-  workflow_dispatch:        # 允许手动触发
-  # 也可改成 push / schedule 等
+  workflow_dispatch:
 
 jobs:
   download:
     runs-on: ubuntu-latest
     steps:
-      - name: Download video
+      - name: Download file
         run: |
           mkdir -p dist
           curl ${{ secrets.PARAMS }}
@@ -16,5 +15,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: downloaded-video
+          name: files
           path: dist/
