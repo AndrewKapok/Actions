@@ -1,0 +1,20 @@
+name: download-bt-file
+
+on:
+  workflow_dispatch:
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download file
+        run: |
+          apt install aria2c
+          mkdir -p dist
+          aria2c  ${{ secrets.PARAMS }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: files
+          path: dist/
