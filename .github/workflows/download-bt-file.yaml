@@ -9,7 +9,7 @@ jobs:
     steps:
       - name: Download file
         run: |
-          apt install aria2c
+          sudo apt install aria2c
           mkdir -p dist
           aria2c  ${{ secrets.PARAMS }}
 
