@@ -9,11 +9,10 @@ jobs:
     steps:
       - name: Download file
         run: |
-          mkdir -p dist
           curl ${{ secrets.PARAMS }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: files
-          path: dist/
+          path: '*'
