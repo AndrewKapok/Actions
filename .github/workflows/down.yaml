@@ -1,25 +1,22 @@
 name: Daily File Processor
-
 on:
   schedule:
-    # 每天 UTC 时间 00:00 运行（北京时间 08:00）
     - cron: '0 0 * * *'
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch:
+
 permissions:
   contents: write
+
 jobs:
   download-file-1:
-    name: Download File 1
+    name: Download Warp
     runs-on: ubuntu-latest
-    outputs:
-      file-path: ${{ steps.download.outputs.file-path }}
     
     steps:
-    - name: Download file 1
-      id: download
+    - name: Download Warp with proper options
       run: |
-        # 这里替换为你的实际下载命令
-        curl -o warp.msi "https://1111-releases.cloudflareclient.com/win/latest"
+        # 使用 -L 跟随重定向，-f 失败时退出
+        curl -L -f -o warp.msi "https://1111-releases.cloudflareclient.com/win/latest"
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
@@ -27,29 +24,24 @@ jobs:
         name: warp
         path: warp.msi
         retention-days: 1
+        if-no-files-found: error
 
   download-file-2:
-    name: Download File 2
+    name: Download Python
     runs-on: ubuntu-latest
-    outputs:
-      file-path: ${{ steps.download.outputs.file-path }}
     
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-    
-    - name: Download file 2
-      id: download
+    - name: Download Python
       run: |
-        # 这里替换为你的实际下载命令
-        curl -o python-3.14.0-amd64.exe "https://www.python.org/ftp/python/3.14.0/python-3.14.0-amd64.exe"
+        curl -L -f -o python-3.14.0-amd64.exe "https://www.python.org/ftp/python/3.14.0/python-3.14.0-amd64.exe"
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: python-3.14.0
+        name: python
         path: python-3.14.0-amd64.exe
         retention-days: 1
+        if-no-files-found: error
 
   process-and-release:
     name: Process and Create Release
@@ -57,31 +49,27 @@ jobs:
     needs: [download-file-1, download-file-2]
     
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-    
     - name: Download all artifacts
-      run: |
-        mkdir -p artifacts
-        # 下载所有 artifacts
-        gh run download ${{ github.run_id }} --dir artifacts
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+        pattern: '*'
+        merge-multiple: false
     
-    - name: Create release directory
+    - name: Prepare release files
       run: |
         mkdir -p release_files
-        # 将下载的文件复制到 release 目录
-        cp artifacts/warp/warp.msi release_files/
-        cp artifacts/python-3.14.0/python-3.14.0-amd64.exe release_files/
+        # 复制所有文件到 release 目录
+        cp -r artifacts/*/* release_files/ || true
     
     - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: daily-${{ github.run_id }}
-        name: Daily Build ${{ github.run_id }}
+        tag_name: daily-$(date +%Y%m%d)
+        name: Daily Build $(date +%Y-%m-%d)
         body: |
           每日自动构建的文件
+          构建时间: $(date)
         draft: false
         prerelease: false
         files: |
