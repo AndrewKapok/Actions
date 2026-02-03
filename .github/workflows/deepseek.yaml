@@ -11,14 +11,11 @@ on:
         description: 'Temperature for generation (0.1-2.0)'
         required: false
         default: '0.7'
-  # 也可以设置定时触发
-  # schedule:
-  #   - cron: '0 0 * * *'
 
 jobs:
   run-ollama:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # 设置超时时间
+    timeout-minutes: 30
     
     steps:
     - name: Checkout repository
@@ -32,36 +29,59 @@ jobs:
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        # 如果有requirements.txt就安装，否则只安装requests
-        if [ -f "requirements.txt" ]; then
-          pip install -r requirements.txt
-        else
-          pip install requests
-        fi
+        pip install requests
+
+    - name: Create necessary directories
+      run: |
+        mkdir -p logs
+        mkdir -p results
+        echo "Directories created"
 
     - name: Install Ollama
       run: |
+        
+        # 安装Ollama
         curl -fsSL https://ollama.com/install.sh | sh
+        
+        # 等待Ollama服务启动
+        sleep 5
         echo "Ollama installed successfully"
 
-    - name: Start Ollama service in background
+    - name: Start Ollama service
       run: |
-        ollama serve &
-        sleep 15  # 给服务更多时间启动
-        echo "Ollama service started"
+        # 确保Ollama服务正在运行
+        sudo systemctl start ollama || true
+        sleep 10
+        
+        # 检查服务状态
+        if systemctl is-active --quiet ollama; then
+          echo "Ollama service is running via systemd"
+        else
+          # 如果systemd服务失败，尝试直接运行
+          nohup ollama serve > ollama.log 2>&1 &
+          echo "Started Ollama service manually"
+          sleep 10
+        fi
+        
+        # 检查端口是否可用
+        if curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
+          echo "Ollama API is accessible"
+        else
+          echo "Warning: Ollama API may not be ready yet"
+        fi
 
     - name: Pull model
       run: |
         ollama pull ${{ github.event.inputs.model_tag || 'huihui_ai/deepseek-r1-abliterated:1.5b' }}
         echo "Model pulled successfully"
 
-    - name: Run Python script from root
+    - name: Run Python script
       env:
         PROMPTS_JSON: ${{ secrets.PROMPTS_JSON }}
         MODEL_TAG: ${{ github.event.inputs.model_tag || 'huihui_ai/deepseek-r1-abliterated:1.5b' }}
         TEMPERATURE: ${{ github.event.inputs.temperature || '0.7' }}
       run: |
-        echo "Running Python script from root directory..."
+        echo "Running Python script..."
         python run_prompts.py
 
     - name: Upload results as artifact
@@ -72,11 +92,15 @@ jobs:
         path: |
           results/
           logs/
+          ollama.log
         retention-days: 7
 
     - name: Clean up
       if: always()
       run: |
         echo "Cleaning up..."
-        pkill ollama || true
-        sleep 5
+        # 停止Ollama服务
+        sudo systemctl stop ollama 2>/dev/null || true
+        # 尝试停止手动启动的服务
+        pkill -f "ollama serve" 2>/dev/null || true
+        sleep 3
