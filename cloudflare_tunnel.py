@@ -240,7 +240,7 @@ def main():
     try:
         # 获取配置
         cf_token = os.getenv('CF_TOKEN')
-        local_port = os.getenv('LOCAL_PORT', '7860')
+        local_port = os.getenv('LOCAL_PORT', '11434')
         local_url = f"http://localhost:{local_port}"
         
         if not cf_token:
@@ -286,20 +286,14 @@ def main():
         
         logger.info("Cloudflare Tunnel 启动成功，按 Ctrl+C 停止...")
         
-        try:
-            # 等待隧道运行
-            while tunnel_process.poll() is None:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            logger.info("收到停止信号")
+        # 等待一段时间让隧道稳定运行
+        time.sleep(10)
         
-        # 停止隧道
-        tunnel_process.terminate()
-        tunnel_process.wait(timeout=10)
+        # 保存隧道进程 ID 以便后续终止
+        with open('tunnel_process.pid', 'w') as f:
+            f.write(str(tunnel_process.pid))
         
-        # 清理
-        manager.cleanup_tunnel(tunnel_id)
-        
+        logger.info("隧道已启动并稳定运行，退出脚本")
         return 0
         
     except Exception as e:
