@@ -1,21 +1,25 @@
-name: Run Ollama with DeepSeek Model
+name: Ollama WebUI with Cloudflare Tunnel
 
 on:
   workflow_dispatch:  # 手动触发
     inputs:
       model_tag:
-        description: 'Model tag to use'
+        description: '模型标签'
         required: true
         default: 'huihui_ai/deepseek-r1-abliterated:1.5b'
-      temperature:
-        description: 'Temperature for generation (0.1-2.0)'
+      local_port:
+        description: '本地服务端口'
         required: false
-        default: '0.7'
+        default: '11434'
+      timeout_minutes:
+        description: '服务运行时长 (分钟)'
+        required: false
+        default: '30'
 
 jobs:
-  run-ollama:
+  webui:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: ${{ fromJSON(github.event.inputs.timeout_minutes) || 30 }}
     
     steps:
     - name: Checkout repository
@@ -26,81 +30,225 @@ jobs:
       with:
         python-version: '3.10'
 
-    - name: Install Python dependencies
+    - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install requests
 
-    - name: Create necessary directories
-      run: |
-        mkdir -p logs
-        mkdir -p results
-        echo "Directories created"
-
     - name: Install Ollama
       run: |
-        
-        # 安装Ollama
+        echo "🤖 安装 Ollama..."
         curl -fsSL https://ollama.com/install.sh | sh
-        
-        # 等待Ollama服务启动
         sleep 5
-        echo "Ollama installed successfully"
-
-    - name: Start Ollama service
-      run: |
-        # 确保Ollama服务正在运行
-        sudo systemctl start ollama || true
+        
+        # 启动 Ollama 服务
+        sudo systemctl start ollama 2>/dev/null || nohup ollama serve > ollama.log 2>&1 &
         sleep 10
         
         # 检查服务状态
-        if systemctl is-active --quiet ollama; then
-          echo "Ollama service is running via systemd"
+        if curl -s http://localhost:${{ github.event.inputs.local_port || '11434' }}/api/tags > /dev/null 2>&1; then
+          echo "✅ Ollama 服务已启动"
         else
-          # 如果systemd服务失败，尝试直接运行
-          nohup ollama serve > ollama.log 2>&1 &
-          echo "Started Ollama service manually"
-          sleep 10
+          echo "⚠️ Ollama 服务可能未就绪"
+        fi
+
+    - name: Pull Model
+      run: |
+        echo "📦 拉取模型: ${{ github.event.inputs.model_tag }}"
+        ollama pull ${{ github.event.inputs.model_tag }}
+        echo "✅ 模型拉取完成"
+
+    - name: Setup Cloudflare Tunnel
+      id: setup_tunnel
+      env:
+        CF_TOKEN: ${{ secrets.CF_TOKEN }}
+        LOCAL_PORT: ${{ github.event.inputs.local_port || '11434' }}
+      run: |
+        echo "🌐 设置 Cloudflare Tunnel..."
+        
+        # 检查 CF_TOKEN
+        if [ -n "$CF_TOKEN" ]; then
+          echo "✅ CF_TOKEN 已设置"
+        else
+          echo "⚠️ CF_TOKEN 未设置，将使用 quick tunnel (临时隧道)"
         fi
         
-        # 检查端口是否可用
-        if curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
-          echo "Ollama API is accessible"
+        # 安装 cloudflared
+        echo "📦 安装 cloudflared..."
+        wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O /tmp/cloudflared
+        sudo chmod +x /tmp/cloudflared
+        sudo mv /tmp/cloudflared /usr/local/bin/cloudflared
+        echo "✅ cloudflared 安装完成"
+        
+        # 验证安装
+        cloudflared --version
+
+    - name: Start Cloudflare Tunnel using cloudflare_tunnel.py
+      id: tunnel
+      env:
+        CF_TOKEN: ${{ secrets.CF_TOKEN }}
+        LOCAL_PORT: ${{ github.event.inputs.local_port || '11434' }}
+      run: |
+        echo "🚀 启动 Cloudflare Tunnel..."
+        
+        # 检查是否有 CF_TOKEN，决定使用哪种方式
+        if [ -n "$CF_TOKEN" ]; then
+          echo "使用 cloudflare_tunnel.py 创建持久隧道"
+          # 使用 cloudflare_tunnel.py 创建隧道
+          python cloudflare_tunnel.py
+          
+          # 等待隧道 URL 文件生成
+          sleep 10
+          
+          if [ -f tunnel_url.txt ]; then
+            TUNNEL_URL=$(cat tunnel_url.txt)
+            if [ -n "$TUNNEL_URL" ]; then
+              echo "✅ Tunnel URL 获取成功: $TUNNEL_URL"
+              echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
+            else
+              echo "⚠️ 无法从 tunnel_url.txt 获取 URL"
+            fi
+          else
+            echo "⚠️ tunnel_url.txt 文件不存在"
+          fi
         else
-          echo "Warning: Ollama API may not be ready yet"
+          echo "使用 quick tunnel 创建临时隧道"
+          # 使用 quick tunnel
+          nohup cloudflared tunnel --url http://localhost:${LOCAL_PORT} > tunnel.log 2>&1 &
+          
+          # 等待隧道启动
+          sleep 15
+          
+          # 提取隧道 URL
+          TUNNEL_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' tunnel.log | head -1)
+          
+          if [ -n "$TUNNEL_URL" ]; then
+            echo "✅ Tunnel 启动成功!"
+            echo "🌐 Tunnel URL: $TUNNEL_URL"
+            echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
+            
+            # 保存 URL 到文件
+            echo "$TUNNEL_URL" > tunnel_url.txt
+          else
+            echo "⚠️ 无法获取 Tunnel URL，查看日志:"
+            cat tunnel.log
+          fi
         fi
 
-    - name: Pull model
+    - name: Display Service Information
       run: |
-        ollama pull ${{ github.event.inputs.model_tag || 'huihui_ai/deepseek-r1-abliterated:1.5b' }}
-        echo "Model pulled successfully"
+        TUNNEL_URL="${{ steps.tunnel.outputs.tunnel_url }}"
+        LOCAL_PORT="${{ github.event.inputs.local_port || '11434' }}"
+        
+        echo "========================================"
+        echo "🌐 Ollama WebUI 服务状态"
+        echo "========================================"
+        echo ""
+        echo "📍 本地地址: http://localhost:$LOCAL_PORT"
+        
+        if [ -n "$TUNNEL_URL" ]; then
+          echo "🔗 公网地址: $TUNNEL_URL"
+          echo ""
+          echo "========================================"
+          echo "💡 API 端点:"
+          echo "========================================"
+          echo "  - 模型列表: $TUNNEL_URL/api/tags"
+          echo "  - 生成文本: POST $TUNNEL_URL/api/generate"
+          echo "  - 聊天: POST $TUNNEL_URL/api/chat"
+          echo ""
+          echo "========================================"
+          echo "💡 WebUI 访问:"
+          echo "========================================"
+          echo "  - WebUI 界面: $TUNNEL_URL"
+        fi
+        
+        echo ""
+        echo "========================================"
+        echo "⚠️  重要提醒:"
+        echo "========================================"
+        echo "  • 服务将在 ${{ github.event.inputs.timeout_minutes || '30' }} 分钟后自动停止"
+        echo "  • 请勿通过此方式传输敏感数据"
+        echo "  • 临时隧道 URL 仅在本次运行期间有效"
+        echo "========================================"
 
-    - name: Run Python script
+    - name: Keep Service Running
       env:
-        PROMPTS_JSON: ${{ secrets.PROMPTS_JSON }}
-        MODEL_TAG: ${{ github.event.inputs.model_tag || 'huihui_ai/deepseek-r1-abliterated:1.5b' }}
-        TEMPERATURE: ${{ github.event.inputs.temperature || '0.7' }}
+        TUNNEL_URL: ${{ steps.tunnel.outputs.tunnel_url }}
       run: |
-        echo "Running Python script..."
-        python run_prompts.py
+        TIMEOUT_MINUTES=${{ github.event.inputs.timeout_minutes || '30' }}
+        TIMEOUT_SECONDS=$((TIMEOUT_MINUTES * 60))
+        
+        echo "🔄 保持服务运行 ${TIMEOUT_MINUTES} 分钟..."
+        echo ""
+        echo "您可以通过以下地址访问服务:"
+        echo "${{ steps.tunnel.outputs.tunnel_url }}"
+        echo ""
+        
+        ELAPSED=0
+        while [ $ELAPSED -lt $TIMEOUT_SECONDS ]; do
+          sleep 30
+          ELAPSED=$((ELAPSED + 30))
+          REMAINING=$((TIMEOUT_SECONDS - ELAPSED))
+          REMAINING_MIN=$((REMAINING / 60))
+          
+          # 检查 Ollama 服务状态
+          if curl -s http://localhost:${{ github.event.inputs.local_port || '11434' }}/api/tags > /dev/null 2>&1; then
+            echo "[$ELAPSED/$TIMEOUT_SECONDS 秒] Ollama 服务运行中... 剩余 ${REMAINING_MIN} 分钟"
+          else
+            echo "[$ELAPSED/$TIMEOUT_SECONDS 秒] Ollama 服务可能已停止"
+          fi
+          
+          # 检查隧道状态
+          if [ -n "${{ steps.tunnel.outputs.tunnel_url }}" ]; then
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${{ steps.tunnel.outputs.tunnel_url }}" || echo "000")
+            if [ "$HTTP_CODE" != "000" ]; then
+              echo "[$ELAPSED/$TIMEOUT_SECONDS 秒] Tunnel 连接正常 (HTTP $HTTP_CODE)"
+            else
+              echo "[$ELAPSED/$TIMEOUT_SECONDS 秒] Tunnel 可能已断开"
+            fi
+          fi
+        done
+        
+        echo "服务运行结束"
 
-    - name: Upload results as artifact
+    - name: Test Service
+      continue-on-error: true
+      run: |
+        LOCAL_PORT="${{ github.event.inputs.local_port || '11434' }}"
+        TUNNEL_URL="${{ steps.tunnel.outputs.tunnel_url }}"
+        
+        echo "🧪 测试 Ollama 服务..."
+        curl -s http://localhost:$LOCAL_PORT/api/tags | head -50 || echo "本地测试失败"
+        
+        if [ -n "$TUNNEL_URL" ]; then
+          echo ""
+          echo "🧪 测试 Tunnel 连接..."
+          curl -s "$TUNNEL_URL/api/tags" | head -50 || echo "Tunnel 测试失败"
+        fi
+
+    - name: Upload Artifacts
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: ollama-results
+        name: webui-logs
         path: |
-          results/
           logs/
+          webui.log
           ollama.log
-        retention-days: 7
+          tunnel.log
+          tunnel_url.txt
+        retention-days: 1
 
-    - name: Clean up
+    - name: Cleanup
       if: always()
       run: |
-        echo "Cleaning up..."
-        # 停止Ollama服务
+        echo "🧹 清理资源..."
+        
+        # 停止 cloudflared
+        pkill -f "cloudflared" 2>/dev/null || true
+        
+        # 停止 Ollama
         sudo systemctl stop ollama 2>/dev/null || true
-        # 尝试停止手动启动的服务
         pkill -f "ollama serve" 2>/dev/null || true
-        sleep 3
+        
+        echo "✅ 清理完成"
