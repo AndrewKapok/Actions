@@ -65,17 +65,9 @@ jobs:
     - name: Setup Cloudflare Tunnel
       id: setup_tunnel
       env:
-        CF_TOKEN: ${{ secrets.CF_TOKEN }}
         LOCAL_PORT: ${{ github.event.inputs.local_port || '11434' }}
       run: |
         echo "🌐 设置 Cloudflare Tunnel..."
-        
-        # 检查 CF_TOKEN
-        if [ -n "$CF_TOKEN" ]; then
-          echo "✅ CF_TOKEN 已设置"
-        else
-          echo "⚠️ CF_TOKEN 未设置，将使用 quick tunnel (临时隧道)"
-        fi
         
         # 安装 cloudflared
         echo "📦 安装 cloudflared..."
@@ -90,90 +82,40 @@ jobs:
     - name: Start Cloudflare Tunnel
       id: tunnel
       env:
-        CF_TOKEN: ${{ secrets.CF_TOKEN }}
         LOCAL_PORT: ${{ github.event.inputs.local_port || '11434' }}
       run: |
         echo "🚀 启动 Cloudflare Tunnel..."
         
-        # 检查是否有 CF_TOKEN，决定使用哪种方式
-        if [ -n "$CF_TOKEN" ]; then
-          echo "使用 cloudflare_tunnel.py 创建持久隧道"
-          # 使用 cloudflare_tunnel.py 创建隧道
-          python cloudflare_tunnel.py
+        # 使用 quick tunnel 创建临时隧道（更简单、更可靠）
+        LOCAL_PORT=${{ github.event.inputs.local_port || '11434' }}
+        echo "创建 Quick Tunnel 指向: http://localhost:$LOCAL_PORT"
+        nohup cloudflared tunnel --url http://localhost:$LOCAL_PORT > tunnel.log 2>&1 &
+        
+        # 等待隧道启动
+        sleep 20
+        
+        # 提取隧道 URL
+        TUNNEL_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' tunnel.log | head -1)
+        
+        if [ -n "$TUNNEL_URL" ]; then
+          echo "✅ Tunnel 启动成功!"
+          echo "🌐 Tunnel URL: $TUNNEL_URL"
+          echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
           
-          # 等待隧道 URL 文件生成
-          sleep 15
-          
-          if [ -f tunnel_url.txt ]; then
-            TUNNEL_URL=$(cat tunnel_url.txt)
-            if [ -n "$TUNNEL_URL" ]; then
-              echo "✅ Tunnel URL 获取成功: $TUNNEL_URL"
-              echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
-            else
-              echo "⚠️ 无法从 tunnel_url.txt 获取 URL"
-              # 尝试直接从 cloudflared 配置获取
-              TUNNEL_URL=$(grep -r 'https://.*\.trycloudflare\.com' ~/.cloudflared/ 2>/dev/null | head -1 | awk '{print $2}')
-              if [ -n "$TUNNEL_URL" ]; then
-                echo "✅ 从配置中获取 Tunnel URL: $TUNNEL_URL"
-                echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
-                echo "$TUNNEL_URL" > tunnel_url.txt
-              fi
-            fi
-          else
-            echo "⚠️ tunnel_url.txt 文件不存在"
-            # 尝试直接从 cloudflared 配置获取
-            TUNNEL_URL=$(grep -r 'https://.*\.trycloudflare\.com' ~/.cloudflared/ 2>/dev/null | head -1 | awk '{print $2}')
-            if [ -n "$TUNNEL_URL" ]; then
-              echo "✅ 从配置中获取 Tunnel URL: $TUNNEL_URL"
-              echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
-              echo "$TUNNEL_URL" > tunnel_url.txt
-            else
-              echo "⚠️ 无法获取 Tunnel URL，使用默认 quick tunnel"
-              #  fallback 到 quick tunnel
-              nohup cloudflared tunnel --url http://localhost:${LOCAL_PORT} > tunnel.log 2>&1 &
-              sleep 15
-              TUNNEL_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' tunnel.log | head -1)
-              if [ -n "$TUNNEL_URL" ]; then
-                echo "✅ Quick Tunnel 启动成功!"
-                echo "🌐 Tunnel URL: $TUNNEL_URL"
-                echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
-                echo "$TUNNEL_URL" > tunnel_url.txt
-              fi
-            fi
-          fi
+          # 保存 URL 到文件
+          echo "$TUNNEL_URL" > tunnel_url.txt
         else
-          echo "使用 quick tunnel 创建临时隧道"
-          # 使用 quick tunnel
-          LOCAL_PORT=${{ github.event.inputs.local_port || '11434' }}
-          echo "创建 Quick Tunnel 指向: http://localhost:$LOCAL_PORT"
-          nohup cloudflared tunnel --url http://localhost:$LOCAL_PORT > tunnel.log 2>&1 &
+          echo "⚠️ 无法获取 Tunnel URL，查看日志:"
+          cat tunnel.log
           
-          # 等待隧道启动
-          sleep 20
-          
-          # 提取隧道 URL
-          TUNNEL_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' tunnel.log | head -1)
-          
+          # 尝试使用另一种方式获取 URL
+          TUNNEL_URL=$(tail -20 tunnel.log | grep -o 'https://[a-z0-9-]*\.trycloudflare\.com')
           if [ -n "$TUNNEL_URL" ]; then
-            echo "✅ Tunnel 启动成功!"
-            echo "🌐 Tunnel URL: $TUNNEL_URL"
+            echo "✅ 从日志尾部获取 Tunnel URL: $TUNNEL_URL"
             echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
-            
-            # 保存 URL 到文件
             echo "$TUNNEL_URL" > tunnel_url.txt
           else
-            echo "⚠️ 无法获取 Tunnel URL，查看日志:"
-            cat tunnel.log
-            
-            # 尝试使用另一种方式获取 URL
-            TUNNEL_URL=$(tail -20 tunnel.log | grep -o 'https://[a-z0-9-]*\.trycloudflare\.com')
-            if [ -n "$TUNNEL_URL" ]; then
-              echo "✅ 从日志尾部获取 Tunnel URL: $TUNNEL_URL"
-              echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
-              echo "$TUNNEL_URL" > tunnel_url.txt
-            else
-              echo "⚠️ 无法获取 Tunnel URL，服务可能无法从外网访问"
-            fi
+            echo "⚠️ 无法获取 Tunnel URL，服务可能无法从外网访问"
           fi
         fi
 
