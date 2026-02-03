@@ -42,14 +42,18 @@ jobs:
         sleep 5
         
         # 启动 Ollama 服务
-        sudo systemctl start ollama 2>/dev/null || nohup ollama serve > ollama.log 2>&1 &
-        sleep 10
+        LOCAL_PORT=${{ github.event.inputs.local_port || '11434' }}
+        echo "启动 Ollama 服务在端口: $LOCAL_PORT"
+        sudo systemctl start ollama 2>/dev/null || nohup OLLAMA_HOST=0.0.0.0:$LOCAL_PORT ollama serve > ollama.log 2>&1 &
+        sleep 15
         
         # 检查服务状态
         if curl -s http://localhost:${{ github.event.inputs.local_port || '11434' }}/api/tags > /dev/null 2>&1; then
           echo "✅ Ollama 服务已启动"
+          curl -s http://localhost:${{ github.event.inputs.local_port || '11434' }}/api/tags | head -20
         else
-          echo "⚠️ Ollama 服务可能未就绪"
+          echo "⚠️ Ollama 服务可能未就绪，查看日志:"
+          cat ollama.log
         fi
 
     - name: Pull Model
@@ -83,7 +87,7 @@ jobs:
         # 验证安装
         cloudflared --version
 
-    - name: Start Cloudflare Tunnel using cloudflare_tunnel.py
+    - name: Start Cloudflare Tunnel
       id: tunnel
       env:
         CF_TOKEN: ${{ secrets.CF_TOKEN }}
@@ -98,7 +102,7 @@ jobs:
           python cloudflare_tunnel.py
           
           # 等待隧道 URL 文件生成
-          sleep 10
+          sleep 15
           
           if [ -f tunnel_url.txt ]; then
             TUNNEL_URL=$(cat tunnel_url.txt)
@@ -107,17 +111,45 @@ jobs:
               echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
             else
               echo "⚠️ 无法从 tunnel_url.txt 获取 URL"
+              # 尝试直接从 cloudflared 配置获取
+              TUNNEL_URL=$(grep -r 'https://.*\.trycloudflare\.com' ~/.cloudflared/ 2>/dev/null | head -1 | awk '{print $2}')
+              if [ -n "$TUNNEL_URL" ]; then
+                echo "✅ 从配置中获取 Tunnel URL: $TUNNEL_URL"
+                echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
+                echo "$TUNNEL_URL" > tunnel_url.txt
+              fi
             fi
           else
             echo "⚠️ tunnel_url.txt 文件不存在"
+            # 尝试直接从 cloudflared 配置获取
+            TUNNEL_URL=$(grep -r 'https://.*\.trycloudflare\.com' ~/.cloudflared/ 2>/dev/null | head -1 | awk '{print $2}')
+            if [ -n "$TUNNEL_URL" ]; then
+              echo "✅ 从配置中获取 Tunnel URL: $TUNNEL_URL"
+              echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
+              echo "$TUNNEL_URL" > tunnel_url.txt
+            else
+              echo "⚠️ 无法获取 Tunnel URL，使用默认 quick tunnel"
+              #  fallback 到 quick tunnel
+              nohup cloudflared tunnel --url http://localhost:${LOCAL_PORT} > tunnel.log 2>&1 &
+              sleep 15
+              TUNNEL_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' tunnel.log | head -1)
+              if [ -n "$TUNNEL_URL" ]; then
+                echo "✅ Quick Tunnel 启动成功!"
+                echo "🌐 Tunnel URL: $TUNNEL_URL"
+                echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
+                echo "$TUNNEL_URL" > tunnel_url.txt
+              fi
+            fi
           fi
         else
           echo "使用 quick tunnel 创建临时隧道"
           # 使用 quick tunnel
-          nohup cloudflared tunnel --url http://localhost:${LOCAL_PORT} > tunnel.log 2>&1 &
+          LOCAL_PORT=${{ github.event.inputs.local_port || '11434' }}
+          echo "创建 Quick Tunnel 指向: http://localhost:$LOCAL_PORT"
+          nohup cloudflared tunnel --url http://localhost:$LOCAL_PORT > tunnel.log 2>&1 &
           
           # 等待隧道启动
-          sleep 15
+          sleep 20
           
           # 提取隧道 URL
           TUNNEL_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' tunnel.log | head -1)
@@ -132,6 +164,16 @@ jobs:
           else
             echo "⚠️ 无法获取 Tunnel URL，查看日志:"
             cat tunnel.log
+            
+            # 尝试使用另一种方式获取 URL
+            TUNNEL_URL=$(tail -20 tunnel.log | grep -o 'https://[a-z0-9-]*\.trycloudflare\.com')
+            if [ -n "$TUNNEL_URL" ]; then
+              echo "✅ 从日志尾部获取 Tunnel URL: $TUNNEL_URL"
+              echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
+              echo "$TUNNEL_URL" > tunnel_url.txt
+            else
+              echo "⚠️ 无法获取 Tunnel URL，服务可能无法从外网访问"
+            fi
           fi
         fi
 
@@ -232,12 +274,11 @@ jobs:
       with:
         name: webui-logs
         path: |
-          logs/
-          webui.log
           ollama.log
           tunnel.log
           tunnel_url.txt
         retention-days: 1
+        if-no-files-found: warn
 
     - name: Cleanup
       if: always()
