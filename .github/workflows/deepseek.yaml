@@ -97,67 +97,15 @@ jobs:
       - name: 启动隧道
         id: start-tunnel
         run: |
-          if [ -n "${{ secrets.CF_TOKEN }}" ]; then
-              # 使用持久化隧道
-              echo "使用持久化隧道模式"
-              
-              # 创建隧道配置目录
-              mkdir -p ~/.cloudflared
-              
-              # 设置环境变量
-              export CF_API_TOKEN=${{ secrets.CF_TOKEN }}
-              
-              # 创建隧道
-              TUNNEL_NAME="github-actions-tunnel-$(date +%s)"
-              TUNNEL_OUTPUT=$(cloudflared tunnel create $TUNNEL_NAME 2>&1)
-              echo "隧道创建输出: $TUNNEL_OUTPUT"
-              
-              # 提取隧道 ID
-              TUNNEL_ID=$(echo "$TUNNEL_OUTPUT" | grep -oP 'Created tunnel .* with id \K[^\s]+')
-              if [ -z "$TUNNEL_ID" ]; then
-                  echo "无法创建持久化隧道，尝试使用 Quick Tunnel"
-                  # 回退到 Quick Tunnel
-                  cloudflared tunnel --url http://localhost:${{ inputs.local_port }} --name quick-tunnel > tunnel.log 2>&1 &
-                  TUNNEL_PID=$!
-                  echo $TUNNEL_PID > tunnel.pid
-                  
-                  # 等待隧道启动并获取 URL
-                  sleep 10
-                  TUNNEL_URL=$(grep -oP 'https://[^\s]+trycloudflare.com' tunnel.log | tail -1)
-              else
-                  echo "隧道 ID: $TUNNEL_ID"
-                  
-                  # 创建配置文件
-                  cat > ~/.cloudflared/config.yml << EOF
-          tunnel: $TUNNEL_ID
-          credentials-file: ~/.cloudflared/$TUNNEL_ID.json
-          ingress:
-            - hostname: *
-              service: http://localhost:${{ inputs.local_port }}
-            - service: http_status:404
-          EOF
-                  
-                  # 启动隧道
-                  cloudflared tunnel --config ~/.cloudflared/config.yml run > tunnel.log 2>&1 &
-                  TUNNEL_PID=$!
-                  echo $TUNNEL_PID > tunnel.pid
-                  echo $TUNNEL_ID > tunnel_id.txt
-                  
-                  # 等待隧道启动并获取 URL
-                  sleep 10
-                  TUNNEL_URL=$(cloudflared tunnel info $TUNNEL_ID 2>&1 | grep -oP 'https://[^\s]+trycloudflare.com')
-              fi
-          else
-              # 使用 Quick Tunnel
-              echo "使用 Quick Tunnel 模式"
-              cloudflared tunnel --url http://localhost:${{ inputs.local_port }} --name quick-tunnel > tunnel.log 2>&1 &
-              TUNNEL_PID=$!
-              echo $TUNNEL_PID > tunnel.pid
-              
-              # 等待隧道启动并获取 URL
-              sleep 10
-              TUNNEL_URL=$(grep -oP 'https://[^\s]+trycloudflare.com' tunnel.log | tail -1)
-          fi
+          # 始终使用 Quick Tunnel
+          echo "使用 Quick Tunnel 模式"
+          cloudflared tunnel --url http://localhost:${{ inputs.local_port }} --name quick-tunnel > tunnel.log 2>&1 &
+          TUNNEL_PID=$!
+          echo $TUNNEL_PID > tunnel.pid
+          
+          # 等待隧道启动并获取 URL
+          sleep 10
+          TUNNEL_URL=$(grep -oP 'https://[^\s]+trycloudflare.com' tunnel.log | tail -1)
           
           # 保存隧道 URL
           if [ -n "$TUNNEL_URL" ]; then
@@ -249,14 +197,6 @@ jobs:
               TUNNEL_PID=$(cat tunnel.pid)
               kill $TUNNEL_PID 2>/dev/null || true
               echo "隧道已停止"
-          fi
-          
-          # 删除临时隧道
-          if [ -f tunnel_id.txt ]; then
-              TUNNEL_ID=$(cat tunnel_id.txt)
-              export CF_API_TOKEN=${{ secrets.CF_TOKEN }}
-              cloudflared tunnel delete -f $TUNNEL_ID 2>/dev/null || true
-              echo "临时隧道已删除"
           fi
           
           echo "资源清理完成"
