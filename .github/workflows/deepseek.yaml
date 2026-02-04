@@ -1,338 +1,262 @@
 name: Cloudflare Tunnel Test
 
 on:
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch:
     inputs:
       local_port:
         description: '本地服务端口'
-        required: false
+        required: true
         default: '11434'
       timeout_minutes:
-        description: '服务运行时长 (分钟)'
-        required: false
+        description: '服务运行时长（分钟）'
+        required: true
         default: '30'
 
 jobs:
-  webui:
+  cloudflare-tunnel-test:
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ fromJSON(github.event.inputs.timeout_minutes) || 30 }}
+    timeout-minutes: ${{ inputs.timeout_minutes || 30 }}
     
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      # 服务准备阶段
+      - name: 检出代码
+        uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install requests
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
 
-    - name: Setup Simple HTTP Server
-      run: |
-        echo "🚀 设置简单的 HTTP 服务器..."
-        LOCAL_PORT=${{ github.event.inputs.local_port || '11434' }}
-        
-        # 创建一个简单的测试页面
-        mkdir -p test-server
-        cat > test-server/index.html << 'EOF'
-        <!DOCTYPE html>
-        <html lang="zh-CN">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Cloudflare Tunnel 测试</title>
-            <style>
-                body {
-                    font-family: Arial, sans-serif;
-                    max-width: 800px;
-                    margin: 0 auto;
-                    padding: 20px;
-                    text-align: center;
-                    background-color: #f0f0f0;
-                }
-                h1 {
-                    color: #333;
-                }
-                .success {
-                    background-color: #d4edda;
-                    color: #155724;
-                    padding: 15px;
-                    border-radius: 5px;
-                    margin: 20px 0;
-                }
-                .info {
-                    background-color: #d1ecf1;
-                    color: #0c5460;
-                    padding: 15px;
-                    border-radius: 5px;
-                    margin: 20px 0;
-                }
-            </style>
-        </head>
-        <body>
-            <h1>🌐 Cloudflare Tunnel 测试页面</h1>
-            <div class="success">
-                <h2>✅ 服务运行正常</h2>
-                <p>这是一个简单的测试页面，用于验证 Cloudflare Tunnel 是否正常工作。</p>
-            </div>
-            <div class="info">
-                <h3>📋 测试信息</h3>
-                <p>本地端口: $LOCAL_PORT</p>
-                <p>服务状态: 运行中</p>
-                <p>测试时间: $(date)</p>
-            </div>
-            <p>如果您看到此页面，说明 Cloudflare Tunnel 配置成功！</p>
-        </body>
-        </html>
-        EOF
-        
-        # 启动 HTTP 服务器
-        echo "启动 HTTP 服务器在端口: $LOCAL_PORT"
-        nohup python3 -m http.server $LOCAL_PORT --directory test-server > http-server.log 2>&1 &
-        sleep 10
-        
-        # 检查服务状态
-        if curl -s http://localhost:$LOCAL_PORT > /dev/null 2>&1; then
-          echo "✅ HTTP 服务器已启动"
-          curl -s http://localhost:$LOCAL_PORT | head -30
-        else
-          echo "⚠️ HTTP 服务器可能未就绪，查看日志:"
-          cat http-server.log
-        fi
-
-    - name: Setup Cloudflare Tunnel
-      id: setup_tunnel
-      env:
-        LOCAL_PORT: ${{ github.event.inputs.local_port || '11434' }}
-      run: |
-        echo "🌐 设置 Cloudflare Tunnel..."
-        
-        # 安装 cloudflared
-        echo "📦 安装 cloudflared..."
-        wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O /tmp/cloudflared
-        sudo chmod +x /tmp/cloudflared
-        sudo mv /tmp/cloudflared /usr/local/bin/cloudflared
-        echo "✅ cloudflared 安装完成"
-        
-        # 验证安装
-        cloudflared --version
-        
-        # 创建 .cloudflared 目录并生成证书（解决 origin certificate 缺失问题）
-        echo "🔑 准备 Cloudflare 证书..."
-        mkdir -p ~/.cloudflared
-        # 生成证书（用于持久化隧道，Quick Tunnel 也会使用）
-        cloudflared tunnel login 2>/dev/null || true
-        # 即使登录失败，也创建一个空的证书文件作为占位符
-        touch ~/.cloudflared/cert.pem
-        echo "✅ 证书准备完成"
-
-    - name: Start Cloudflare Tunnel
-      id: tunnel
-      env:
-        LOCAL_PORT: ${{ github.event.inputs.local_port || '11434' }}
-        CF_TOKEN: ${{ secrets.CF_TOKEN }}
-      run: |
-        echo "🚀 启动 Cloudflare Tunnel..."
-        
-        LOCAL_PORT=${{ github.event.inputs.local_port || '11434' }}
-        
-        # 检查是否有 CF_TOKEN
-        if [ -n "$CF_TOKEN" ]; then
-          echo "🔑 检测到 CF_TOKEN，使用持久化隧道模式..."
+      - name: 创建 HTTP 服务器
+        run: |
+          # 创建测试页面
+          mkdir -p server
+          cat > server/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <title>Cloudflare Tunnel Test</title>
+              <style>
+                  body { font-family: Arial, sans-serif; margin: 40px; }
+                  h1 { color: #333; }
+                  .status { padding: 10px; margin: 10px 0; border-radius: 4px; }
+                  .success { background-color: #d4edda; color: #155724; }
+                  .info { background-color: #d1ecf1; color: #0c5460; }
+              </style>
+          </head>
+          <body>
+              <h1>Cloudflare Tunnel Test Server</h1>
+              <div class="status success">服务状态: 运行中</div>
+              <div class="status info">本地端口: ${{ inputs.local_port }}</div>
+              <div class="status info">启动时间: $(date)</div>
+              <p>此页面用于验证 Cloudflare Tunnel 是否正常工作。</p>
+          </body>
+          </html>
+          EOF
           
-          # 创建隧道名称
-          TUNNEL_NAME="github-actions-tunnel-$(date +%s)"
+          # 启动 HTTP 服务器
+          cd server && python -m http.server ${{ inputs.local_port }} &
+          SERVER_PID=$!
+          echo $SERVER_PID > ../server.pid
           
-          # 登录 Cloudflare
-          echo "🔐 登录 Cloudflare..."
-          cloudflared tunnel login --api-token $CF_TOKEN 2>/dev/null || true
+          # 等待服务启动
+          sleep 5
           
-          # 创建隧道
-          echo "🌐 创建持久化隧道: $TUNNEL_NAME"
-          cloudflared tunnel create $TUNNEL_NAME --api-token $CF_TOKEN 2>&1 || true
-          
-          # 获取隧道 ID
-          TUNNEL_ID=$(grep -o 'Created tunnel \([a-f0-9-]*\)' tunnel.log 2>/dev/null | head -1 | awk '{print $3}' || echo "")
-          
-          if [ -n "$TUNNEL_ID" ]; then
-            # 配置隧道
-            echo "📝 配置隧道..."
-            mkdir -p ~/.cloudflared
-            cat > ~/.cloudflared/config.yml << EOF
-tunnel: $TUNNEL_ID
-credentials-file: ~/.cloudflared/$TUNNEL_ID.json
-ingress:
-  - hostname: "*"
-    service: http://localhost:$LOCAL_PORT
-  - service: http_status:404
-EOF
-
-            # 启动隧道
-            echo "🚀 启动持久化隧道..."
-            nohup cloudflared tunnel run $TUNNEL_NAME --api-token $CF_TOKEN > tunnel.log 2>&1 &
+          # 检查服务是否正常启动
+          if curl -s http://localhost:${{ inputs.local_port }} > /dev/null; then
+              echo "HTTP 服务器启动成功"
           else
-            echo "⚠️ 无法创建持久化隧道，回退到 Quick Tunnel..."
-            # 回退到 Quick Tunnel
-            nohup cloudflared tunnel --url http://localhost:$LOCAL_PORT > tunnel.log 2>&1 &
+              echo "HTTP 服务器启动失败"
+              exit 1
           fi
-        else
-          echo "🌐 未检测到 CF_TOKEN，使用 Quick Tunnel 模式..."
-          # 使用 quick tunnel 创建临时隧道
-          echo "创建 Quick Tunnel 指向: http://localhost:$LOCAL_PORT"
-          nohup cloudflared tunnel --url http://localhost:$LOCAL_PORT > tunnel.log 2>&1 &
-        fi
-        
-        # 等待隧道启动
-        sleep 20
-        
-        # 提取隧道 URL
-        TUNNEL_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' tunnel.log | head -1)
-        
-        if [ -n "$TUNNEL_URL" ]; then
-          echo "✅ Tunnel 启动成功!"
-          echo "🌐 Tunnel URL: $TUNNEL_URL"
-          echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
+
+      # 隧道配置阶段
+      - name: 安装 Cloudflare Tunnel
+        run: |
+          # 检查是否已安装
+          if command -v cloudflared &> /dev/null; then
+              echo "cloudflared 已安装"
+          else
+              echo "安装 cloudflared..."
+              wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O /tmp/cloudflared
+              sudo chmod +x /tmp/cloudflared
+              sudo mv /tmp/cloudflared /usr/local/bin/cloudflared
+              if cloudflared --version; then
+                  echo "cloudflared 安装成功"
+              else
+                  echo "cloudflared 安装失败"
+                  exit 1
+              fi
+          fi
+
+      - name: 启动隧道
+        id: start-tunnel
+        run: |
+          if [ -n "${{ secrets.CF_TOKEN }}" ]; then
+              # 使用持久化隧道
+              echo "使用持久化隧道模式"
+              
+              # 创建隧道配置目录
+              mkdir -p ~/.cloudflared
+              
+              # 设置环境变量
+              export CF_API_TOKEN=${{ secrets.CF_TOKEN }}
+              
+              # 创建隧道
+              TUNNEL_NAME="github-actions-tunnel-$(date +%s)"
+              TUNNEL_OUTPUT=$(cloudflared tunnel create $TUNNEL_NAME 2>&1)
+              echo "隧道创建输出: $TUNNEL_OUTPUT"
+              
+              # 提取隧道 ID
+              TUNNEL_ID=$(echo "$TUNNEL_OUTPUT" | grep -oP 'Created tunnel .* with id \K[^\s]+')
+              if [ -z "$TUNNEL_ID" ]; then
+                  echo "无法创建持久化隧道，尝试使用 Quick Tunnel"
+                  # 回退到 Quick Tunnel
+                  cloudflared tunnel --url http://localhost:${{ inputs.local_port }} --name quick-tunnel > tunnel.log 2>&1 &
+                  TUNNEL_PID=$!
+                  echo $TUNNEL_PID > tunnel.pid
+                  
+                  # 等待隧道启动并获取 URL
+                  sleep 10
+                  TUNNEL_URL=$(grep -oP 'https://[^\s]+trycloudflare.com' tunnel.log | tail -1)
+              else
+                  echo "隧道 ID: $TUNNEL_ID"
+                  
+                  # 创建配置文件
+                  cat > ~/.cloudflared/config.yml << EOF
+          tunnel: $TUNNEL_ID
+          credentials-file: ~/.cloudflared/$TUNNEL_ID.json
+          ingress:
+            - hostname: *
+              service: http://localhost:${{ inputs.local_port }}
+            - service: http_status:404
+          EOF
+                  
+                  # 启动隧道
+                  cloudflared tunnel --config ~/.cloudflared/config.yml run > tunnel.log 2>&1 &
+                  TUNNEL_PID=$!
+                  echo $TUNNEL_PID > tunnel.pid
+                  echo $TUNNEL_ID > tunnel_id.txt
+                  
+                  # 等待隧道启动并获取 URL
+                  sleep 10
+                  TUNNEL_URL=$(cloudflared tunnel info $TUNNEL_ID 2>&1 | grep -oP 'https://[^\s]+trycloudflare.com')
+              fi
+          else
+              # 使用 Quick Tunnel
+              echo "使用 Quick Tunnel 模式"
+              cloudflared tunnel --url http://localhost:${{ inputs.local_port }} --name quick-tunnel > tunnel.log 2>&1 &
+              TUNNEL_PID=$!
+              echo $TUNNEL_PID > tunnel.pid
+              
+              # 等待隧道启动并获取 URL
+              sleep 10
+              TUNNEL_URL=$(grep -oP 'https://[^\s]+trycloudflare.com' tunnel.log | tail -1)
+          fi
           
-          # 保存 URL 到文件
-          echo "$TUNNEL_URL" > tunnel_url.txt
-        else
-          echo "⚠️ 无法获取 Tunnel URL，查看日志:"
-          cat tunnel.log
-          
-          # 尝试使用另一种方式获取 URL
-          TUNNEL_URL=$(tail -20 tunnel.log | grep -o 'https://[a-z0-9-]*\.trycloudflare\.com')
+          # 保存隧道 URL
           if [ -n "$TUNNEL_URL" ]; then
-            echo "✅ 从日志尾部获取 Tunnel URL: $TUNNEL_URL"
-            echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
-            echo "$TUNNEL_URL" > tunnel_url.txt
+              echo "隧道 URL: $TUNNEL_URL"
+              echo $TUNNEL_URL > tunnel_url.txt
+              echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
           else
-            echo "⚠️ 无法获取 Tunnel URL，服务可能无法从外网访问"
+              echo "无法获取隧道 URL"
+              exit 1
           fi
-        fi
 
-    - name: Display Service Information
-      run: |
-        TUNNEL_URL="${{ steps.tunnel.outputs.tunnel_url }}"
-        LOCAL_PORT="${{ github.event.inputs.local_port || '11434' }}"
-        
-        echo "========================================"
-        echo "🌐 Cloudflare Tunnel 测试服务状态"
-        echo "========================================"
-        echo ""
-        echo "📍 本地地址: http://localhost:$LOCAL_PORT"
-        
-        if [ -n "$TUNNEL_URL" ]; then
-          echo "🔗 公网地址: $TUNNEL_URL"
-          echo ""
+      # 服务管理阶段
+      - name: 显示服务信息
+        run: |
           echo "========================================"
-          echo "💡 访问信息:"
+          echo "服务信息"
           echo "========================================"
-          echo "  - 测试页面: $TUNNEL_URL"
-          echo "  - 本地测试: http://localhost:$LOCAL_PORT"
-        fi
-        
-        echo ""
-        echo "========================================"
-        echo "⚠️  重要提醒:"
-        echo "========================================"
-        echo "  • 服务将在 ${{ github.event.inputs.timeout_minutes || '30' }} 分钟后自动停止"
-        echo "  • 请勿通过此方式传输敏感数据"
-        echo "  • 临时隧道 URL 仅在本次运行期间有效"
-        echo "========================================"
+          echo "本地地址: http://localhost:${{ inputs.local_port }}"
+          echo "公网地址: $(cat tunnel_url.txt)"
+          echo "========================================"
 
-    - name: Keep Service Running
-      env:
-        TUNNEL_URL: ${{ steps.tunnel.outputs.tunnel_url }}
-      run: |
-        TIMEOUT_MINUTES=${{ github.event.inputs.timeout_minutes || '30' }}
-        TIMEOUT_SECONDS=$((TIMEOUT_MINUTES * 60))
-        
-        echo "🔄 保持服务运行 ${TIMEOUT_MINUTES} 分钟..."
-        echo ""
-        echo "您可以通过以下地址访问服务:"
-        echo "${{ steps.tunnel.outputs.tunnel_url }}"
-        echo ""
-        
-        ELAPSED=0
-        while [ $ELAPSED -lt $TIMEOUT_SECONDS ]; do
-          sleep 30
-          ELAPSED=$((ELAPSED + 30))
-          REMAINING=$((TIMEOUT_SECONDS - ELAPSED))
-          REMAINING_MIN=$((REMAINING / 60))
+      - name: 保持服务运行
+        run: |
+          TIMEOUT_SECONDS=$(( ${{ inputs.timeout_minutes }} * 60 ))
+          START_TIME=$(date +%s)
+          END_TIME=$(( START_TIME + TIMEOUT_SECONDS ))
           
-          # 检查 HTTP 服务器状态
-          if curl -s http://localhost:${{ github.event.inputs.local_port || '11434' }} > /dev/null 2>&1; then
-            echo "[$ELAPSED/$TIMEOUT_SECONDS 秒] HTTP 服务器运行中... 剩余 ${REMAINING_MIN} 分钟"
+          echo "服务将运行 ${{ inputs.timeout_minutes }} 分钟，直到 $(date -d @$END_TIME)"
+          
+          while [ $(date +%s) -lt $END_TIME ]; do
+              echo "$(date): 服务运行中..."
+              
+              # 检查本地服务
+              if curl -s http://localhost:${{ inputs.local_port }} > /dev/null; then
+                  echo "$(date): 本地服务正常"
+              else
+                  echo "$(date): 本地服务异常"
+              fi
+              
+              # 检查隧道连接
+              if curl -s $(cat tunnel_url.txt) > /dev/null; then
+                  echo "$(date): 隧道连接正常"
+              else
+                  echo "$(date): 隧道连接异常"
+              fi
+              
+              # 等待 60 秒
+              sleep 60
+          done
+
+      - name: 测试连接
+        run: |
+          echo "测试本地服务连接..."
+          if curl -s http://localhost:${{ inputs.local_port }} > /dev/null; then
+              echo "本地服务连接成功"
           else
-            echo "[$ELAPSED/$TIMEOUT_SECONDS 秒] HTTP 服务器可能已停止"
+              echo "本地服务连接失败"
           fi
           
-          # 检查隧道状态
-          if [ -n "${{ steps.tunnel.outputs.tunnel_url }}" ]; then
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${{ steps.tunnel.outputs.tunnel_url }}" || echo "000")
-            if [ "$HTTP_CODE" != "000" ]; then
-              echo "[$ELAPSED/$TIMEOUT_SECONDS 秒] Tunnel 连接正常 (HTTP $HTTP_CODE)"
-            else
-              echo "[$ELAPSED/$TIMEOUT_SECONDS 秒] Tunnel 可能已断开"
-            fi
+          echo "测试隧道连接..."
+          if curl -s $(cat tunnel_url.txt) > /dev/null; then
+              echo "隧道连接成功"
+          else
+              echo "隧道连接失败"
           fi
-        done
-        
-        echo "服务运行结束"
 
-    - name: Test Service
-      continue-on-error: true
-      run: |
-        LOCAL_PORT="${{ github.event.inputs.local_port || '11434' }}"
-        TUNNEL_URL="${{ steps.tunnel.outputs.tunnel_url }}"
-        
-        echo "🧪 测试 HTTP 服务器..."
-        curl -s http://localhost:$LOCAL_PORT | head -30 || echo "本地测试失败"
-        
-        if [ -n "$TUNNEL_URL" ]; then
-          echo ""
-          echo "🧪 测试 Tunnel 连接..."
-          curl -s "$TUNNEL_URL" | head -30 || echo "Tunnel 测试失败"
-        fi
+      - name: 上传日志
+        uses: actions/upload-artifact@v4
+        with:
+          name: tunnel-logs
+          path: |
+            tunnel.log
+            tunnel_url.txt
 
-    - name: Upload Artifacts
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: tunnel-test-logs
-        path: |
-          http-server.log
-          tunnel.log
-          tunnel_url.txt
-        retention-days: 1
-        if-no-files-found: warn
-
-    - name: Cleanup
-      if: always()
-      env:
-        CF_TOKEN: ${{ secrets.CF_TOKEN }}
-      run: |
-        echo "🧹 清理资源..."
-        
-        # 停止 cloudflared
-        pkill -f "cloudflared" 2>/dev/null || true
-        
-        # 如果有 CF_TOKEN，清理持久化隧道
-        if [ -n "$CF_TOKEN" ]; then
-          echo "🔄 清理持久化隧道..."
-          # 获取隧道 ID 并删除
-          TUNNEL_ID=$(grep -o 'Created tunnel \([a-f0-9-]*\)' tunnel.log 2>/dev/null | head -1 | awk '{print $3}' || echo "")
-          if [ -n "$TUNNEL_ID" ]; then
-            cloudflared tunnel delete -f $TUNNEL_ID --api-token $CF_TOKEN 2>/dev/null || true
-            echo "✅ 持久化隧道已清理"
+      - name: 清理资源
+        if: always()
+        run: |
+          echo "清理资源..."
+          
+          # 停止 HTTP 服务器
+          if [ -f server.pid ]; then
+              SERVER_PID=$(cat server.pid)
+              kill $SERVER_PID 2>/dev/null || true
+              echo "HTTP 服务器已停止"
           fi
-        fi
-        
-        # 停止 HTTP 服务器
-        pkill -f "python3 -m http.server" 2>/dev/null || true
-        
-        echo "✅ 清理完成"
+          
+          # 停止隧道
+          if [ -f tunnel.pid ]; then
+              TUNNEL_PID=$(cat tunnel.pid)
+              kill $TUNNEL_PID 2>/dev/null || true
+              echo "隧道已停止"
+          fi
+          
+          # 删除临时隧道
+          if [ -f tunnel_id.txt ]; then
+              TUNNEL_ID=$(cat tunnel_id.txt)
+              export CF_API_TOKEN=${{ secrets.CF_TOKEN }}
+              cloudflared tunnel delete -f $TUNNEL_ID 2>/dev/null || true
+              echo "临时隧道已删除"
+          fi
+          
+          echo "资源清理完成"
