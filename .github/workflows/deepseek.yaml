@@ -78,18 +78,71 @@ jobs:
         
         # 验证安装
         cloudflared --version
+        
+        # 创建 .cloudflared 目录并生成证书（解决 origin certificate 缺失问题）
+        echo "🔑 准备 Cloudflare 证书..."
+        mkdir -p ~/.cloudflared
+        # 生成证书（用于持久化隧道，Quick Tunnel 也会使用）
+        cloudflared tunnel login --stdout 2>/dev/null || true
+        # 即使登录失败，也创建一个空的证书文件作为占位符
+        touch ~/.cloudflared/cert.pem
+        echo "✅ 证书准备完成"
 
     - name: Start Cloudflare Tunnel
       id: tunnel
       env:
         LOCAL_PORT: ${{ github.event.inputs.local_port || '11434' }}
+        CF_TOKEN: ${{ secrets.CF_TOKEN }}
       run: |
         echo "🚀 启动 Cloudflare Tunnel..."
         
-        # 使用 quick tunnel 创建临时隧道（更简单、更可靠）
         LOCAL_PORT=${{ github.event.inputs.local_port || '11434' }}
-        echo "创建 Quick Tunnel 指向: http://localhost:$LOCAL_PORT"
-        nohup cloudflared tunnel --url http://localhost:$LOCAL_PORT > tunnel.log 2>&1 &
+        
+        # 检查是否有 CF_TOKEN
+        if [ -n "$CF_TOKEN" ]; then
+          echo "🔑 检测到 CF_TOKEN，使用持久化隧道模式..."
+          
+          # 创建隧道名称
+          TUNNEL_NAME="github-actions-tunnel-$(date +%s)"
+          
+          # 登录 Cloudflare
+          echo "🔐 登录 Cloudflare..."
+          cloudflared tunnel login --api-token $CF_TOKEN --stdout 2>/dev/null || true
+          
+          # 创建隧道
+          echo "🌐 创建持久化隧道: $TUNNEL_NAME"
+          cloudflared tunnel create $TUNNEL_NAME --api-token $CF_TOKEN 2>&1 || true
+          
+          # 获取隧道 ID
+          TUNNEL_ID=$(grep -o 'Created tunnel \([a-f0-9-]*\)' tunnel.log 2>/dev/null | head -1 | awk '{print $3}' || echo "")
+          
+          if [ -n "$TUNNEL_ID" ]; then
+            # 配置隧道
+            echo "📝 配置隧道..."
+            mkdir -p ~/.cloudflared
+            cat > ~/.cloudflared/config.yml << EOF
+            tunnel: $TUNNEL_ID
+            credentials-file: ~/.cloudflared/$TUNNEL_ID.json
+            ingress:
+              - hostname: *
+                service: http://localhost:$LOCAL_PORT
+              - service: http_status:404
+            EOF
+            
+            # 启动隧道
+            echo "🚀 启动持久化隧道..."
+            nohup cloudflared tunnel run $TUNNEL_NAME --api-token $CF_TOKEN > tunnel.log 2>&1 &
+          else
+            echo "⚠️ 无法创建持久化隧道，回退到 Quick Tunnel..."
+            # 回退到 Quick Tunnel
+            nohup cloudflared tunnel --url http://localhost:$LOCAL_PORT > tunnel.log 2>&1 &
+          fi
+        else
+          echo "🌐 未检测到 CF_TOKEN，使用 Quick Tunnel 模式..."
+          # 使用 quick tunnel 创建临时隧道
+          echo "创建 Quick Tunnel 指向: http://localhost:$LOCAL_PORT"
+          nohup cloudflared tunnel --url http://localhost:$LOCAL_PORT > tunnel.log 2>&1 &
+        fi
         
         # 等待隧道启动
         sleep 20
@@ -224,11 +277,24 @@ jobs:
 
     - name: Cleanup
       if: always()
+      env:
+        CF_TOKEN: ${{ secrets.CF_TOKEN }}
       run: |
         echo "🧹 清理资源..."
         
         # 停止 cloudflared
         pkill -f "cloudflared" 2>/dev/null || true
+        
+        # 如果有 CF_TOKEN，清理持久化隧道
+        if [ -n "$CF_TOKEN" ]; then
+          echo "🔄 清理持久化隧道..."
+          # 获取隧道 ID 并删除
+          TUNNEL_ID=$(grep -o 'Created tunnel \([a-f0-9-]*\)' tunnel.log 2>/dev/null | head -1 | awk '{print $3}' || echo "")
+          if [ -n "$TUNNEL_ID" ]; then
+            cloudflared tunnel delete -f $TUNNEL_ID --api-token $CF_TOKEN 2>/dev/null || true
+            echo "✅ 持久化隧道已清理"
+          fi
+        fi
         
         # 停止 Ollama
         sudo systemctl stop ollama 2>/dev/null || true
