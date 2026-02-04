@@ -99,13 +99,29 @@ jobs:
         run: |
           # 始终使用 Quick Tunnel
           echo "使用 Quick Tunnel 模式"
-          cloudflared tunnel --url http://localhost:${{ inputs.local_port }} --name quick-tunnel > tunnel.log 2>&1 &
+          
+          # 启动隧道
+          cloudflared tunnel --url http://localhost:${{ inputs.local_port }} > tunnel.log 2>&1 &
           TUNNEL_PID=$!
           echo $TUNNEL_PID > tunnel.pid
           
           # 等待隧道启动并获取 URL
-          sleep 10
-          TUNNEL_URL=$(grep -oP 'https://[^\s]+trycloudflare.com' tunnel.log | tail -1)
+          echo "等待隧道启动..."
+          sleep 15
+          
+          # 显示隧道日志内容以调试
+          echo "隧道日志内容:"
+          cat tunnel.log
+          
+          # 尝试多种方式提取 URL
+          echo "尝试提取隧道 URL..."
+          TUNNEL_URL=$(grep -o 'https\?://[^[:space:]]*trycloudflare\.com' tunnel.log | tail -1)
+          
+          # 如果第一种方式失败，尝试第二种方式
+          if [ -z "$TUNNEL_URL" ]; then
+              echo "第一种方式失败，尝试第二种方式..."
+              TUNNEL_URL=$(grep -o 'https\?://[^[:space:]]*' tunnel.log | grep trycloudflare.com | tail -1)
+          fi
           
           # 保存隧道 URL
           if [ -n "$TUNNEL_URL" ]; then
@@ -113,7 +129,8 @@ jobs:
               echo $TUNNEL_URL > tunnel_url.txt
               echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
           else
-              echo "无法获取隧道 URL"
+              echo "无法获取隧道 URL，显示完整日志:"
+              cat tunnel.log
               exit 1
           fi
 
