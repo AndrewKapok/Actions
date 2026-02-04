@@ -56,12 +56,6 @@ jobs:
           cat ollama.log
         fi
 
-    - name: Pull Model
-      run: |
-        echo "📦 拉取模型: ${{ github.event.inputs.model_tag }}"
-        ollama pull ${{ github.event.inputs.model_tag }}
-        echo "✅ 模型拉取完成"
-
     - name: Setup Cloudflare Tunnel
       id: setup_tunnel
       env:
@@ -171,6 +165,12 @@ EOF
             echo "⚠️ 无法获取 Tunnel URL，服务可能无法从外网访问"
           fi
         fi
+
+    - name: Pull Model
+      run: |
+        echo "📦 拉取模型: ${{ github.event.inputs.model_tag }}"
+        ollama pull ${{ github.event.inputs.model_tag }}
+        echo "✅ 模型拉取完成"
 
     - name: Display Service Information
       run: |
