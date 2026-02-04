@@ -19,201 +19,68 @@ jobs:
     
     steps:
       # 服务准备阶段
-      - name: 检出代码
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 设置 Python
+      - name: Set Python Environment
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: 安装依赖
-        run: |
+      - name: Install Dependencies
+        run: |    
           python -m pip install --upgrade pip
           pip install requests
 
-      - name: 创建 HTTP 服务器
+      # 隧道配置阶段
+      - name: Install Cloudflare Tunnel
         run: |
-          # 创建测试页面
-          mkdir -p server
-          cat > server/index.html << 'EOF'
-          <!DOCTYPE html>
-          <html>
-          <head>
-              <title>Cloudflare Tunnel Test</title>
-              <style>
-                  body { font-family: Arial, sans-serif; margin: 40px; }
-                  h1 { color: #333; }
-                  .status { padding: 10px; margin: 10px 0; border-radius: 4px; }
-                  .success { background-color: #d4edda; color: #155724; }
-                  .info { background-color: #d1ecf1; color: #0c5460; }
-              </style>
-          </head>
-          <body>
-              <h1>Cloudflare Tunnel Test Server</h1>
-              <div class="status success">服务状态: 运行中</div>
-              <div class="status info">本地端口: ${{ inputs.local_port }}</div>
-              <div class="status info">启动时间: $(date)</div>
-              <p>此页面用于验证 Cloudflare Tunnel 是否正常工作。</p>
-          </body>
-          </html>
-          EOF
-          
-          # 启动 HTTP 服务器
-          cd server && python -m http.server ${{ inputs.local_port }} &
-          SERVER_PID=$!
-          echo $SERVER_PID > ../server.pid
-          
-          # 等待服务启动
-          sleep 5
-          
-          # 检查服务是否正常启动
-          if curl -s http://localhost:${{ inputs.local_port }} > /dev/null; then
-              echo "HTTP 服务器启动成功"
-          else
-              echo "HTTP 服务器启动失败"
-              exit 1
-          fi
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O /tmp/cloudflared
+          sudo chmod +x /tmp/cloudflared
+          sudo mv /tmp/cloudflared /usr/local/bin/cloudflared
+
+      # 安装Ollama
+      - name: Install Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama --version
+
+      # 下载并运行模型
+      - name: Pull and Run Model
+        run: |
+          ollama pull huihui_ai/deepseek-r1-abliterated:8b
+          ollama run huihui_ai/deepseek-r1-abliterated:8b &
+
+      # 安装并运行WebUI
+      - name: Install and Run WebUI
+        run: |
+          git clone https://github.com/ollama-webui/ollama-webui.git
+          cd ollama-webui
+          npm install
+          npm run build
+          npm run start > webui.log 2>&1 &
+          cd ..
 
       # 隧道配置阶段
-      - name: 安装 Cloudflare Tunnel
-        run: |
-          # 检查是否已安装
-          if command -v cloudflared &> /dev/null; then
-              echo "cloudflared 已安装"
-          else
-              echo "安装 cloudflared..."
-              wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O /tmp/cloudflared
-              sudo chmod +x /tmp/cloudflared
-              sudo mv /tmp/cloudflared /usr/local/bin/cloudflared
-              if cloudflared --version; then
-                  echo "cloudflared 安装成功"
-              else
-                  echo "cloudflared 安装失败"
-                  exit 1
-              fi
-          fi
-
-      - name: 启动隧道
+      - name: Start Cloudflare Tunnel
         id: start-tunnel
         run: |
-          # 始终使用 Quick Tunnel
-          echo "使用 Quick Tunnel 模式"
-          
-          # 启动隧道
           cloudflared tunnel --url http://localhost:${{ inputs.local_port }} > tunnel.log 2>&1 &
           TUNNEL_PID=$!
           echo $TUNNEL_PID > tunnel.pid
-          
-          # 等待隧道启动并获取 URL
-          echo "等待隧道启动..."
-          sleep 15
-          
-          # 显示隧道日志内容以调试
-          echo "隧道日志内容:"
-          cat tunnel.log
-          
-          # 尝试多种方式提取 URL
-          echo "尝试提取隧道 URL..."
+          sleep 5
           TUNNEL_URL=$(grep -o 'https\?://[^[:space:]]*trycloudflare\.com' tunnel.log | tail -1)
-          
-          # 如果第一种方式失败，尝试第二种方式
+
           if [ -z "$TUNNEL_URL" ]; then
-              echo "第一种方式失败，尝试第二种方式..."
               TUNNEL_URL=$(grep -o 'https\?://[^[:space:]]*' tunnel.log | grep trycloudflare.com | tail -1)
           fi
-          
-          # 保存隧道 URL
-          if [ -n "$TUNNEL_URL" ]; then
-              echo "隧道 URL: $TUNNEL_URL"
-              echo $TUNNEL_URL > tunnel_url.txt
-              echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
-          else
-              echo "无法获取隧道 URL，显示完整日志:"
-              cat tunnel.log
-              exit 1
-          fi
+          echo $TUNNEL_URL > tunnel_url.txt
+          echo "公网地址: $TUNNEL_URL"
+          echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
 
-      # 服务管理阶段
-      - name: 显示服务信息
+      # 保持服务运行
+      - name: Keep Service Running
         run: |
-          echo "========================================"
-          echo "服务信息"
-          echo "========================================"
-          echo "本地地址: http://localhost:${{ inputs.local_port }}"
-          echo "公网地址: $(cat tunnel_url.txt)"
-          echo "========================================"
-
-      - name: 保持服务运行
-        run: |
-          TIMEOUT_SECONDS=$(( ${{ inputs.timeout_minutes }} * 60 ))
-          START_TIME=$(date +%s)
-          END_TIME=$(( START_TIME + TIMEOUT_SECONDS ))
-          
-          echo "服务将运行 ${{ inputs.timeout_minutes }} 分钟，直到 $(date -d @$END_TIME)"
-          
-          while [ $(date +%s) -lt $END_TIME ]; do
-              echo "$(date): 服务运行中..."
-              
-              # 检查本地服务
-              if curl -s http://localhost:${{ inputs.local_port }} > /dev/null; then
-                  echo "$(date): 本地服务正常"
-              else
-                  echo "$(date): 本地服务异常"
-              fi
-              
-              # 检查隧道连接
-              if curl -s $(cat tunnel_url.txt) > /dev/null; then
-                  echo "$(date): 隧道连接正常"
-              else
-                  echo "$(date): 隧道连接异常"
-              fi
-              
-              # 等待 60 秒
-              sleep 60
+          while true; do
+            sleep 60
           done
-
-      - name: 测试连接
-        run: |
-          echo "测试本地服务连接..."
-          if curl -s http://localhost:${{ inputs.local_port }} > /dev/null; then
-              echo "本地服务连接成功"
-          else
-              echo "本地服务连接失败"
-          fi
-          
-          echo "测试隧道连接..."
-          if curl -s $(cat tunnel_url.txt) > /dev/null; then
-              echo "隧道连接成功"
-          else
-              echo "隧道连接失败"
-          fi
-
-      - name: 上传日志
-        uses: actions/upload-artifact@v4
-        with:
-          name: tunnel-logs
-          path: |
-            tunnel.log
-            tunnel_url.txt
-
-      - name: 清理资源
-        if: always()
-        run: |
-          echo "清理资源..."
-          
-          # 停止 HTTP 服务器
-          if [ -f server.pid ]; then
-              SERVER_PID=$(cat server.pid)
-              kill $SERVER_PID 2>/dev/null || true
-              echo "HTTP 服务器已停止"
-          fi
-          
-          # 停止隧道
-          if [ -f tunnel.pid ]; then
-              TUNNEL_PID=$(cat tunnel.pid)
-              kill $TUNNEL_PID 2>/dev/null || true
-              echo "隧道已停止"
-          fi
-          
-          echo "资源清理完成"
