@@ -83,7 +83,7 @@ jobs:
         echo "🔑 准备 Cloudflare 证书..."
         mkdir -p ~/.cloudflared
         # 生成证书（用于持久化隧道，Quick Tunnel 也会使用）
-        cloudflared tunnel login --stdout 2>/dev/null || true
+        cloudflared tunnel login 2>/dev/null || true
         # 即使登录失败，也创建一个空的证书文件作为占位符
         touch ~/.cloudflared/cert.pem
         echo "✅ 证书准备完成"
@@ -107,7 +107,7 @@ jobs:
           
           # 登录 Cloudflare
           echo "🔐 登录 Cloudflare..."
-          cloudflared tunnel login --api-token $CF_TOKEN --stdout 2>/dev/null || true
+          cloudflared tunnel login --api-token $CF_TOKEN 2>/dev/null || true
           
           # 创建隧道
           echo "🌐 创建持久化隧道: $TUNNEL_NAME"
@@ -121,13 +121,13 @@ jobs:
             echo "📝 配置隧道..."
             mkdir -p ~/.cloudflared
             cat > ~/.cloudflared/config.yml << EOF
-            tunnel: $TUNNEL_ID
-            credentials-file: ~/.cloudflared/$TUNNEL_ID.json
-            ingress:
-              - hostname: *
-                service: http://localhost:$LOCAL_PORT
-              - service: http_status:404
-            EOF
+tunnel: $TUNNEL_ID
+credentials-file: ~/.cloudflared/$TUNNEL_ID.json
+ingress:
+  - hostname: *
+    service: http://localhost:$LOCAL_PORT
+  - service: http_status:404
+EOF
             
             # 启动隧道
             echo "🚀 启动持久化隧道..."
