@@ -43,6 +43,12 @@ jobs:
       - name: Install Ollama
         run: |
           curl -fsSL https://ollama.com/install.sh | sh
+
+      # 确保Ollama服务启动
+      - name: Start Ollama Service
+        run: |
+          sudo systemctl start ollama
+          sleep 5
           ollama --version
 
       # 下载并运行模型
