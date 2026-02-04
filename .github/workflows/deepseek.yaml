@@ -56,7 +56,7 @@ jobs:
         run: |
           git clone https://github.com/ollama-webui/ollama-webui.git
           cd ollama-webui
-          npm install
+          npm install --legacy-peer-deps
           npm run build
           npm run start > webui.log 2>&1 &
           cd ..
