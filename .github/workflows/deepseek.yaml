@@ -166,7 +166,7 @@ jobs:
 tunnel: $TUNNEL_ID
 credentials-file: ~/.cloudflared/$TUNNEL_ID.json
 ingress:
-  - hostname: *
+  - hostname: "*"
     service: http://localhost:$LOCAL_PORT
   - service: http_status:404
 EOF
