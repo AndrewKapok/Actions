@@ -10,7 +10,7 @@ on:
       timeout_minutes:
         description: '服务运行时长（分钟）'
         required: true
-        default: '30'
+        default: '120'
 
 jobs:
   cloudflare-tunnel-test:
@@ -71,22 +71,42 @@ jobs:
       - name: Start Cloudflare Tunnel
         id: start-tunnel
         run: |
+          # 启动隧道
           cloudflared tunnel --url http://localhost:${{ inputs.local_port }} > tunnel.log 2>&1 &
           TUNNEL_PID=$!
           echo $TUNNEL_PID > tunnel.pid
-          sleep 5
-          TUNNEL_URL=$(grep -o 'https\?://[^[:space:]]*trycloudflare\.com' tunnel.log | tail -1)
+          
+          # 等待隧道启动并获取URL
+          echo "等待隧道启动..."
+          for i in {1..30}; do
+            sleep 2
+            TUNNEL_URL=$(grep -o 'https\?://[^[:space:]]*trycloudflare\.com' tunnel.log | tail -1)
+            if [ -n "$TUNNEL_URL" ]; then
+              break
+            fi
+          done
 
           if [ -z "$TUNNEL_URL" ]; then
-              TUNNEL_URL=$(grep -o 'https\?://[^[:space:]]*' tunnel.log | grep trycloudflare.com | tail -1)
+              echo "无法获取隧道URL，检查日志..."
+              cat tunnel.log
+              exit 1
           fi
+          
           echo $TUNNEL_URL > tunnel_url.txt
           echo "公网地址: $TUNNEL_URL"
           echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
 
-      # 保持服务运行
+      # 保持服务运行直到超时
       - name: Keep Service Running
         run: |
-          while true; do
-            sleep 60
-          done
+          TIMEOUT=${{ inputs.timeout_minutes }}
+          echo "服务将运行 $TIMEOUT 分钟后自动退出"
+          sleep $((TIMEOUT * 60))
+          echo "超时时间已到，正在清理..."
+          # 停止隧道
+          if [ -f tunnel.pid ]; then
+            kill $(cat tunnel.pid) 2>/dev/null
+          fi
+          # 停止Ollama服务
+          sudo systemctl stop ollama 2>/dev/null
+          echo "清理完成，服务已停止"
