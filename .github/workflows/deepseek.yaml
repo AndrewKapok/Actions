@@ -1,12 +1,8 @@
-name: Ollama WebUI with Cloudflare Tunnel
+name: Cloudflare Tunnel Test
 
 on:
   workflow_dispatch:  # 手动触发
     inputs:
-      model_tag:
-        description: '模型标签'
-        required: true
-        default: 'huihui_ai/deepseek-r1-abliterated:1.5b'
       local_port:
         description: '本地服务端口'
         required: false
@@ -35,25 +31,77 @@ jobs:
         python -m pip install --upgrade pip
         pip install requests
 
-    - name: Install Ollama
+    - name: Setup Simple HTTP Server
       run: |
-        echo "🤖 安装 Ollama..."
-        curl -fsSL https://ollama.com/install.sh | sh
-        sleep 5
-        
-        # 启动 Ollama 服务
+        echo "🚀 设置简单的 HTTP 服务器..."
         LOCAL_PORT=${{ github.event.inputs.local_port || '11434' }}
-        echo "启动 Ollama 服务在端口: $LOCAL_PORT"
-        sudo systemctl start ollama 2>/dev/null || nohup OLLAMA_HOST=0.0.0.0:$LOCAL_PORT ollama serve > ollama.log 2>&1 &
-        sleep 15
+        
+        # 创建一个简单的测试页面
+        mkdir -p test-server
+        cat > test-server/index.html << 'EOF'
+        <!DOCTYPE html>
+        <html lang="zh-CN">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Cloudflare Tunnel 测试</title>
+            <style>
+                body {
+                    font-family: Arial, sans-serif;
+                    max-width: 800px;
+                    margin: 0 auto;
+                    padding: 20px;
+                    text-align: center;
+                    background-color: #f0f0f0;
+                }
+                h1 {
+                    color: #333;
+                }
+                .success {
+                    background-color: #d4edda;
+                    color: #155724;
+                    padding: 15px;
+                    border-radius: 5px;
+                    margin: 20px 0;
+                }
+                .info {
+                    background-color: #d1ecf1;
+                    color: #0c5460;
+                    padding: 15px;
+                    border-radius: 5px;
+                    margin: 20px 0;
+                }
+            </style>
+        </head>
+        <body>
+            <h1>🌐 Cloudflare Tunnel 测试页面</h1>
+            <div class="success">
+                <h2>✅ 服务运行正常</h2>
+                <p>这是一个简单的测试页面，用于验证 Cloudflare Tunnel 是否正常工作。</p>
+            </div>
+            <div class="info">
+                <h3>📋 测试信息</h3>
+                <p>本地端口: $LOCAL_PORT</p>
+                <p>服务状态: 运行中</p>
+                <p>测试时间: $(date)</p>
+            </div>
+            <p>如果您看到此页面，说明 Cloudflare Tunnel 配置成功！</p>
+        </body>
+        </html>
+        EOF
+        
+        # 启动 HTTP 服务器
+        echo "启动 HTTP 服务器在端口: $LOCAL_PORT"
+        nohup python3 -m http.server $LOCAL_PORT --directory test-server > http-server.log 2>&1 &
+        sleep 10
         
         # 检查服务状态
-        if curl -s http://localhost:${{ github.event.inputs.local_port || '11434' }}/api/tags > /dev/null 2>&1; then
-          echo "✅ Ollama 服务已启动"
-          curl -s http://localhost:${{ github.event.inputs.local_port || '11434' }}/api/tags | head -20
+        if curl -s http://localhost:$LOCAL_PORT > /dev/null 2>&1; then
+          echo "✅ HTTP 服务器已启动"
+          curl -s http://localhost:$LOCAL_PORT | head -30
         else
-          echo "⚠️ Ollama 服务可能未就绪，查看日志:"
-          cat ollama.log
+          echo "⚠️ HTTP 服务器可能未就绪，查看日志:"
+          cat http-server.log
         fi
 
     - name: Setup Cloudflare Tunnel
@@ -122,7 +170,7 @@ ingress:
     service: http://localhost:$LOCAL_PORT
   - service: http_status:404
 EOF
-            
+
             # 启动隧道
             echo "🚀 启动持久化隧道..."
             nohup cloudflared tunnel run $TUNNEL_NAME --api-token $CF_TOKEN > tunnel.log 2>&1 &
@@ -166,19 +214,13 @@ EOF
           fi
         fi
 
-    - name: Pull Model
-      run: |
-        echo "📦 拉取模型: ${{ github.event.inputs.model_tag }}"
-        ollama pull ${{ github.event.inputs.model_tag }}
-        echo "✅ 模型拉取完成"
-
     - name: Display Service Information
       run: |
         TUNNEL_URL="${{ steps.tunnel.outputs.tunnel_url }}"
         LOCAL_PORT="${{ github.event.inputs.local_port || '11434' }}"
         
         echo "========================================"
-        echo "🌐 Ollama WebUI 服务状态"
+        echo "🌐 Cloudflare Tunnel 测试服务状态"
         echo "========================================"
         echo ""
         echo "📍 本地地址: http://localhost:$LOCAL_PORT"
@@ -187,16 +229,10 @@ EOF
           echo "🔗 公网地址: $TUNNEL_URL"
           echo ""
           echo "========================================"
-          echo "💡 API 端点:"
+          echo "💡 访问信息:"
           echo "========================================"
-          echo "  - 模型列表: $TUNNEL_URL/api/tags"
-          echo "  - 生成文本: POST $TUNNEL_URL/api/generate"
-          echo "  - 聊天: POST $TUNNEL_URL/api/chat"
-          echo ""
-          echo "========================================"
-          echo "💡 WebUI 访问:"
-          echo "========================================"
-          echo "  - WebUI 界面: $TUNNEL_URL"
+          echo "  - 测试页面: $TUNNEL_URL"
+          echo "  - 本地测试: http://localhost:$LOCAL_PORT"
         fi
         
         echo ""
@@ -228,11 +264,11 @@ EOF
           REMAINING=$((TIMEOUT_SECONDS - ELAPSED))
           REMAINING_MIN=$((REMAINING / 60))
           
-          # 检查 Ollama 服务状态
-          if curl -s http://localhost:${{ github.event.inputs.local_port || '11434' }}/api/tags > /dev/null 2>&1; then
-            echo "[$ELAPSED/$TIMEOUT_SECONDS 秒] Ollama 服务运行中... 剩余 ${REMAINING_MIN} 分钟"
+          # 检查 HTTP 服务器状态
+          if curl -s http://localhost:${{ github.event.inputs.local_port || '11434' }} > /dev/null 2>&1; then
+            echo "[$ELAPSED/$TIMEOUT_SECONDS 秒] HTTP 服务器运行中... 剩余 ${REMAINING_MIN} 分钟"
           else
-            echo "[$ELAPSED/$TIMEOUT_SECONDS 秒] Ollama 服务可能已停止"
+            echo "[$ELAPSED/$TIMEOUT_SECONDS 秒] HTTP 服务器可能已停止"
           fi
           
           # 检查隧道状态
@@ -254,22 +290,22 @@ EOF
         LOCAL_PORT="${{ github.event.inputs.local_port || '11434' }}"
         TUNNEL_URL="${{ steps.tunnel.outputs.tunnel_url }}"
         
-        echo "🧪 测试 Ollama 服务..."
-        curl -s http://localhost:$LOCAL_PORT/api/tags | head -50 || echo "本地测试失败"
+        echo "🧪 测试 HTTP 服务器..."
+        curl -s http://localhost:$LOCAL_PORT | head -30 || echo "本地测试失败"
         
         if [ -n "$TUNNEL_URL" ]; then
           echo ""
           echo "🧪 测试 Tunnel 连接..."
-          curl -s "$TUNNEL_URL/api/tags" | head -50 || echo "Tunnel 测试失败"
+          curl -s "$TUNNEL_URL" | head -30 || echo "Tunnel 测试失败"
         fi
 
     - name: Upload Artifacts
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: webui-logs
+        name: tunnel-test-logs
         path: |
-          ollama.log
+          http-server.log
           tunnel.log
           tunnel_url.txt
         retention-days: 1
@@ -296,8 +332,7 @@ EOF
           fi
         fi
         
-        # 停止 Ollama
-        sudo systemctl stop ollama 2>/dev/null || true
-        pkill -f "ollama serve" 2>/dev/null || true
+        # 停止 HTTP 服务器
+        pkill -f "python3 -m http.server" 2>/dev/null || true
         
         echo "✅ 清理完成"
