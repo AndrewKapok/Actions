@@ -1,0 +1,205 @@
+name: Build Latest Full Clang Toolchain (Git + ThinLTO + Full Tools)
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_branch:
+        description: "LLVM 源码分支"
+        required: true
+        default: "main"
+
+env:
+  INSTALL_DIR: D:/clang-install
+  CCACHE_DIR: D:/ccache
+  SEVEN_ZIP: "C:/Program Files/7-Zip/7z.exe"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: 配置 MSYS2 编译环境
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: mingw64
+          update: true
+          install: >-
+            base-devel
+            git
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-ccache
+            mingw-w64-x86_64-lld
+            mingw-w64-x86_64-python3
+            p7zip
+
+      - name: 配置 ccache 编译缓存
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: win-clang-full-ccache-${{ github.sha }}
+          restore-keys: |
+            win-clang-full-ccache-
+
+      - name: Git 浅克隆最新 LLVM 源码
+        run: |
+          git clone --depth=1 --branch ${{ github.event.inputs.git_branch }} \
+            https://github.com/llvm/llvm-project.git
+
+      - name: 提取版本号到环境变量
+        run: |
+          cd llvm-project
+          VER=$(git describe --tags --always | sed 's/^llvmorg-//')
+          echo "LLVM_VER=${VER}" >> $GITHUB_ENV
+          echo "构建版本: ${VER}"
+
+      - name: CMake 构建配置 (ThinLTO + 全量工具集)
+        run: |
+          INSTALL_MSYS=$(cygpath "${{ env.INSTALL_DIR }}")
+          CCACHE_MSYS=$(cygpath "${{ env.CCACHE_DIR }}")
+          mkdir -p "${CCACHE_MSYS}"
+          export CCACHE_DIR="${CCACHE_MSYS}"
+
+          cmake -G Ninja \
+            -S llvm-project/llvm \
+            -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${INSTALL_MSYS}" \
+            \
+            # 全量项目：编译器 + 链接器 + 工具集 + 调试器
+            -DLLVM_ENABLE_PROJECTS="clang;lld;clang-tools-extra;lldb" \
+            -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi;libunwind" \
+            -DLLVM_TARGETS_TO_BUILD="X86" \
+            \
+            # 关闭非运行必需组件，不影响工具集完整性
+            -DLLVM_INCLUDE_DOCS=OFF
+            -DLLVM_INCLUDE_EXAMPLES=OFF
+            -DLLVM_INCLUDE_TESTS=OFF
+            -DLLVM_INCLUDE_BENCHMARKS=OFF
+            -DLLVM_ENABLE_ASSERTIONS=OFF
+            -DLLVM_ENABLE_BACKTRACES=OFF
+            \
+            # 编译速度优化
+            -DLLVM_USE_LINKER=lld \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DLLVM_PARALLEL_LINK_JOBS=2 \
+            \
+            # 静态自包含配置
+            -DLLVM_BUILD_LLVM_DYLIB=OFF \
+            -DLLVM_STATIC_LINK_CXX_STDLIB=ON \
+            -DLIBCXX_ENABLE_SHARED=OFF \
+            -DLIBCXXABI_ENABLE_SHARED=OFF \
+            -DLIBUNWIND_ENABLE_SHARED=OFF \
+            -DLIBCXX_HAS_WIN32_THREAD_API=ON \
+            \
+            # 默认行为优化
+            -DCLANG_DEFAULT_CXX_STDLIB=libc++ \
+            -DCLANG_DEFAULT_LINKER=lld \
+            \
+            # 全链路 ThinLTO 优化
+            -DLLVM_ENABLE_LTO=Thin
+
+      - name: 编译并安装
+        run: |
+          ninja -C build install -j$((NUMBER_OF_PROCESSORS + 1))
+
+      - name: 整合 MinGW 运行时 (完全自包含)
+        run: |
+          INSTALL_MSYS=$(cygpath "${{ env.INSTALL_DIR }}")
+          # 复制 C 标准库头文件与基础运行库
+          cp -rf /mingw64/include/* "${INSTALL_MSYS}/include/"
+          cp -rf /mingw64/lib/* "${INSTALL_MSYS}/lib/"
+          # 复制系统库到 clang 内置搜索路径
+          mkdir -p "${INSTALL_MSYS}/lib/clang/${LLVM_VER}/lib/windows"
+          cp /mingw64/x86_64-w64-mingw32/lib/*.a "${INSTALL_MSYS}/lib/clang/${LLVM_VER}/lib/windows/"
+
+      - name: 体积优化 (仅去符号 + 清冗余，不删任何工具)
+        run: |
+          INSTALL_MSYS=$(cygpath "${{ env.INSTALL_DIR }}")
+          STRIP="${INSTALL_MSYS}/bin/llvm-strip.exe"
+
+          # 1. 全量剥离所有可执行文件、静态库的调试符号（不影响功能，体积减少50%+）
+          find "${INSTALL_MSYS}/bin" -name "*.exe" -exec "${STRIP}" {} \;
+          find "${INSTALL_MSYS}/lib" -name "*.a" -exec "${STRIP}" --strip-debug {} \;
+          find "${INSTALL_MSYS}/lib" -name "*.dll.a" -exec "${STRIP}" --strip-debug {} \;
+
+          # 2. 仅删除非运行必需的冗余文件，所有工具二进制完整保留
+          rm -rf "${INSTALL_MSYS}/share"          # 文档、man手册
+          rm -rf "${INSTALL_MSYS}/lib/cmake"      # CMake 配置文件
+          rm -rf "${INSTALL_MSYS}/lib/pkgconfig"  # pkgconfig 配置
+          rm -rf "${INSTALL_MSYS}/include/llvm-c" # 仅C绑定头文件，如需开发LLVM插件可删除此行
+
+      - name: 功能完整性验证
+        run: |
+          INSTALL_MSYS=$(cygpath "${{ env.INSTALL_DIR }}")
+          export PATH="${INSTALL_MSYS}/bin:${PATH}"
+
+          # 核心编译器验证
+          clang --version
+          clang++ --version
+          clang-cl --version
+
+          # 开发工具验证
+          clang-format --version
+          clang-tidy --version
+          clangd --version
+
+          # 调试器验证
+          lldb --version
+
+          # IR/底层工具抽样验证
+          llvm-dis --version
+          llvm-as --version
+          opt --version
+          llvm-mca --version
+          llvm-objdump --version
+
+          # C++ 标准库自包含编译测试
+          echo '#include <iostream>
+          #include <vector>
+          #include <string>
+          int main() {
+              std::vector<int> v = {1,2,3,4,5};
+              std::cout << "Full Clang toolchain works!" << std::endl;
+              return 0;
+          }' > test.cpp
+
+          clang++ -static test.cpp -o test.exe
+          ./test.exe
+
+      - name: 7z 极限压缩
+        shell: powershell
+        run: |
+          & "${{ env.SEVEN_ZIP }}" a -mx=9 -m0=lzma2 -md=256m -mmt=on `
+            clang-full.7z `
+            "${{ env.INSTALL_DIR }}\*"
+
+      - name: 生成单文件自解压 EXE
+        shell: powershell
+        run: |
+          $ver = "${{ env.LLVM_VER }}"
+          @"
+          ;!@Install@!UTF-8!
+          Title="Clang $ver Full Toolchain x64"
+          InstallPath=".\Clang-$ver-full-x64"
+          ExtractPathText="解压到:"
+          ButtonInstall="解压"
+          ButtonCancel="取消"
+          OverwriteMode="2"
+          ;!@InstallEnd@!
+          "@ | Out-File -Encoding UTF8 config.txt
+
+          $sfx = "${env:ProgramFiles}\7-Zip\7z.sfx"
+          Copy-Item $sfx .\7z.sfx
+          cmd /c copy /b 7z.sfx + config.txt + clang-full.7z Clang-$ver-full-x64.exe
+
+      - name: 上传最终自解压产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: Clang-${{ env.LLVM_VER }}-full-win64-ThinLTO
+          path: Clang-${{ env.LLVM_VER }}-full-x64.exe
+          retention-days: 90
