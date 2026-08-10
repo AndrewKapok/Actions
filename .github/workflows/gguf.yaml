@@ -1,173 +1,104 @@
-name: Convert and Upload GGUF
+name: Convert Model to GGUF and Upload to HF Private Repo
 
 on:
   workflow_dispatch:
     inputs:
-      source_repo:
-        description: '源 Hugging Face 模型仓库 ID（例如：deepseek-ai/DeepSeek-V3）'
+      repo_id:
+        description: 'Hugging Face 仓库 ID（例如 meta-llama/Llama-2-7b-hf）'
         required: true
-        type: string
-      quant_type:
-        description: '量化类型（例如：Q8_0, Q4_K_M, F16）'
+      quantize:
+        description: '量化类型（可选，如 q4_0、q8_0，留空则不量化）'
         required: false
-        default: 'Q8_0'
-        type: string
-      split_max_size:
-        description: '分卷最大大小（例如：5GB），留空则按张量数分卷'
-        required: false
-        type: string
-      split_max_tensors:
-        description: '分卷最大张量数（默认 256）'
-        required: false
-        default: '256'
-        type: string
-
-env:
-  HF_TOKEN: ${{ secrets.HF_TOKEN }}
-  SOURCE_REPO: ${{ github.event.inputs.source_repo }}
-  QUANT_TYPE: ${{ github.event.inputs.quant_type }}
-  SPLIT_MAX_SIZE: ${{ github.event.inputs.split_max_size }}
-  SPLIT_MAX_TENSORS: ${{ github.event.inputs.split_max_tensors }}
+        default: ''
 
 jobs:
   convert-and-upload:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
 
     steps:
-      # 1. 检出 llama.cpp 仓库（用于转换工具）
-      - name: Checkout llama.cpp
-        uses: actions/checkout@v4
+      # 1. 检出当前仓库（使用最新版 checkout v6）
+      - name: Checkout current repository
+        uses: actions/checkout@v6
+
+      # 2. 准备 Python 环境
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          repository: ggml-org/llama.cpp
-          path: llama.cpp
+          python-version: '3.10'
 
-      # 2. 安装 Python 依赖
-      - name: Install Python dependencies
+      # 3. 安装依赖：预编译的 llama.cpp 和 Python 库
+      - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install huggingface_hub transformers sentencepiece torch numpy
-
-      # 3. 构建 llama.cpp
-      - name: Build llama.cpp
-        run: |
-          cd llama.cpp
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --config Release -j$(nproc)
-          sudo cp build/bin/llama-quantize /usr/local/bin/
-          sudo cp build/bin/llama-imatrix /usr/local/bin/ || true
-          cd ..
-
-      # 4. 下载源模型
-      - name: Download source model from Hugging Face
-        run: |
+          brew install llama.cpp
           pip install huggingface_hub
+
+      # 4. 克隆 llama.cpp 源码（仅为了获取转换脚本）
+      - name: Clone llama.cpp for conversion script
+        run: |
+          git clone --depth 1 https://github.com/ggerganov/llama.cpp.git
+
+      # 5. 从 Hugging Face 下载指定仓库的所有模型文件
+      - name: Download model from Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
           python -c "
           from huggingface_hub import snapshot_download
           import os
-          repo_id = os.environ['SOURCE_REPO']
-          print(f'Downloading {repo_id}...')
+          repo_id = '${{ github.event.inputs.repo_id }}'
+          print(f'正在下载 {repo_id} ...')
           snapshot_download(
               repo_id=repo_id,
-              local_dir='./source_model',
-              token=os.environ['HF_TOKEN'],
-              ignore_patterns=['*.safetensors', '*.bin', '*.pt'],
+              local_dir='./model',
+              local_dir_use_symlinks=False,
+              token=os.getenv('HF_TOKEN')
           )
           "
 
-      # 5. 【新增】修复 tokenizer_config.json（解决 DeepSeek 的 add_bos_token 断言错误）
-      - name: Fix tokenizer_config.json
+      # 6. 转换为 GGUF（f16，可后续量化）
+      - name: Convert to GGUF
         run: |
-          if [ -f ./source_model/tokenizer_config.json ]; then
-            sudo apt-get install -y jq  # Ubuntu 默认自带，但确保存在
-            jq '.add_bos_token = true' ./source_model/tokenizer_config.json > tmp.json && mv tmp.json ./source_model/tokenizer_config.json
-            echo "Fixed add_bos_token to true"
-          else
-            echo "tokenizer_config.json not found, skipping"
-          fi
+          REPO_ID="${{ github.event.inputs.repo_id }}"
+          MODEL_NAME=$(basename "$REPO_ID")
+          python llama.cpp/convert_hf_to_gguf.py ./model \
+            --outtype f16 \
+            --outfile "${MODEL_NAME}.gguf"
 
-      # 6. 转换模型为 GGUF（F16 中间格式）
-      - name: Convert to GGUF (F16)
+      # 7. （可选）使用 brew 安装的 llama.cpp 工具进行量化
+      - name: Quantize (optional)
+        if: ${{ github.event.inputs.quantize != '' }}
         run: |
-          python llama.cpp/convert_hf_to_gguf.py ./source_model \
-            --outfile ./model-F16.gguf \
-            --outtype f16
+          QUANT="${{ github.event.inputs.quantize }}"
+          MODEL_NAME=$(basename "${{ github.event.inputs.repo_id }}")
+          llama-quantize "${MODEL_NAME}.gguf" "${MODEL_NAME}-${QUANT}.gguf" ${QUANT}
+          # 替换原文件为量化版
+          mv "${MODEL_NAME}-${QUANT}.gguf" "${MODEL_NAME}.gguf"
 
-      # 7. 量化模型（如果指定了量化类型）
-      - name: Quantize model
-        if: env.QUANT_TYPE != '' && env.QUANT_TYPE != 'F16'
-        run: |
-          llama-quantize ./model-F16.gguf ./model.gguf ${{ env.QUANT_TYPE }}
-          rm -f ./model-F16.gguf
-
-      - name: Use F16 model if no quantization
-        if: env.QUANT_TYPE == '' || env.QUANT_TYPE == 'F16'
-        run: |
-          mv ./model-F16.gguf ./model.gguf
-
-      # 8. 分卷处理（如果模型过大）
-      - name: Split GGUF (if needed)
-        run: |
-          if [ -n "$SPLIT_MAX_SIZE" ]; then
-            python llama.cpp/llama-gguf-split --split --split-max-size $SPLIT_MAX_SIZE ./model.gguf ./model
-          elif [ -n "$SPLIT_MAX_TENSORS" ]; then
-            python llama.cpp/llama-gguf-split --split --split-max-tensors $SPLIT_MAX_TENSORS ./model.gguf ./model
-          fi
-          rm -f ./model.gguf || true
-
-      # 9. 准备上传（构建目标仓库名称）
-      - name: Prepare target repo name
-        id: repo_name
-        run: |
-          MODEL_NAME=$(echo "$SOURCE_REPO" | sed 's/.*\///')
-          TARGET_REPO="${MODEL_NAME}-GGUF"
-          echo "target_repo=$TARGET_REPO" >> $GITHUB_OUTPUT
-          echo "Target repository: $TARGET_REPO"
-
-      # 10. 创建 Hugging Face 私有仓库并上传
-      - name: Create and upload to Hugging Face
-        run: |
-          pip install huggingface_hub
-          python -c "
-          import os
-          from huggingface_hub import HfApi, create_repo, upload_folder
-          from pathlib import Path
-
-          token = os.environ['HF_TOKEN']
-          target_repo = os.environ['TARGET_REPO']
-          source_repo = os.environ['SOURCE_REPO']
-
-          api = HfApi()
-
-          create_repo(
-              repo_id=target_repo,
-              token=token,
-              private=True,
-              exist_ok=True
-          )
-          print(f'Repository {target_repo} created/verified')
-
-          readme_content = f'''---
-          license: unknown
-          ---
-          # {target_repo}
-
-          This model is a GGUF conversion of [{source_repo}](https://huggingface.co/{source_repo}).
-
-          Quantization: {os.environ.get('QUANT_TYPE', 'F16')}
-
-          Converted using [llama.cpp](https://github.com/ggml-org/llama.cpp).
-          '''
-          with open('README.md', 'w') as f:
-              f.write(readme_content)
-
-          upload_folder(
-              folder_path='.',
-              repo_id=target_repo,
-              token=token,
-              commit_message=f'GGUF conversion from {source_repo}',
-              ignore_patterns=['*.log', '*.py', '*.sh', 'source_model/*', 'llama.cpp/*', '.git/*']
-          )
-          print(f'Successfully uploaded to https://huggingface.co/{target_repo}')
-          "
+      # 8. 上传 GGUF 到同名私有 Hugging Face 仓库
+      - name: Upload to Hugging Face private repo
         env:
-          TARGET_REPO: ${{ steps.repo_name.outputs.target_repo }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python -c "
+          from huggingface_hub import HfApi, create_repo
+          import os
+          api = HfApi()
+          repo_id = '${{ github.event.inputs.repo_id }}'
+          # 创建私有仓库（若已存在则跳过）
+          try:
+              create_repo(repo_id, private=True, token=os.getenv('HF_TOKEN'), exist_ok=True)
+              print(f'私有仓库 {repo_id} 已就绪')
+          except Exception as e:
+              print(f'创建仓库时出现警告: {e}')
+          # 上传文件
+          model_name = repo_id.split('/')[-1]
+          gguf_file = f'{model_name}.gguf'
+          api.upload_file(
+              path_or_fileobj=gguf_file,
+              path_in_repo=gguf_file,
+              repo_id=repo_id,
+              repo_type='model',
+              token=os.getenv('HF_TOKEN')
+          )
+          print('上传完成！')
+          "
