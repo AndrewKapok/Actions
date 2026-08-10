@@ -1,0 +1,172 @@
+name: Convert and Upload GGUF
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: '源 Hugging Face 模型仓库 ID（例如：meta-llama/Llama-2-7b-hf）'
+        required: true
+        type: string
+      quant_type:
+        description: '量化类型（例如：Q8_0, Q4_K_M, F16）'
+        required: false
+        default: 'Q8_0'
+        type: string
+      split_max_size:
+        description: '分卷最大大小（例如：5GB），留空则按张量数分卷'
+        required: false
+        type: string
+      split_max_tensors:
+        description: '分卷最大张量数（默认 256）'
+        required: false
+        default: '256'
+        type: string
+
+env:
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
+  SOURCE_REPO: ${{ github.event.inputs.source_repo }}
+  QUANT_TYPE: ${{ github.event.inputs.quant_type }}
+  SPLIT_MAX_SIZE: ${{ github.event.inputs.split_max_size }}
+  SPLIT_MAX_TENSORS: ${{ github.event.inputs.split_max_tensors }}
+
+jobs:
+  convert-and-upload:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. 检出 llama.cpp 仓库（用于转换工具）
+      - name: Checkout llama.cpp
+        uses: actions/checkout@v4
+        with:
+          repository: ggml-org/llama.cpp
+          path: llama.cpp
+
+      # 2. 安装 Python 依赖
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install huggingface_hub transformers sentencepiece torch numpy
+
+      # 3. 构建 llama.cpp
+      - name: Build llama.cpp
+        run: |
+          cd llama.cpp
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release -j$(nproc)
+          # 将 llama-quantize 复制到 PATH
+          sudo cp build/bin/llama-quantize /usr/local/bin/
+          sudo cp build/bin/llama-imatrix /usr/local/bin/ || true  # 可选工具
+          cd ..
+
+      # 4. 下载源模型
+      - name: Download source model from Hugging Face
+        run: |
+          pip install huggingface_hub
+          python -c "
+          from huggingface_hub import snapshot_download
+          import os
+          repo_id = os.environ['SOURCE_REPO']
+          print(f'Downloading {repo_id}...')
+          snapshot_download(
+              repo_id=repo_id,
+              local_dir='./source_model',
+              token=os.environ['HF_TOKEN'],
+              ignore_patterns=['*.safetensors', '*.bin', '*.pt'],
+          )
+          "
+
+      # 5. 转换模型为 GGUF（F16 中间格式）
+      - name: Convert to GGUF (F16)
+        run: |
+          python llama.cpp/convert_hf_to_gguf.py ./source_model \
+            --outfile ./model-F16.gguf \
+            --outtype f16
+
+      # 6. 量化模型（如果指定了量化类型）
+      - name: Quantize model
+        if: env.QUANT_TYPE != '' && env.QUANT_TYPE != 'F16'
+        run: |
+          llama-quantize ./model-F16.gguf ./model.gguf ${{ env.QUANT_TYPE }}
+          # 清理中间文件
+          rm -f ./model-F16.gguf
+
+      - name: Use F16 model if no quantization
+        if: env.QUANT_TYPE == '' || env.QUANT_TYPE == 'F16'
+        run: |
+          mv ./model-F16.gguf ./model.gguf
+
+      # 7. 分卷处理（如果模型过大）
+      - name: Split GGUF (if needed)
+        run: |
+          if [ -n "$SPLIT_MAX_SIZE" ]; then
+            python llama.cpp/llama-gguf-split --split --split-max-size $SPLIT_MAX_SIZE ./model.gguf ./model
+          elif [ -n "$SPLIT_MAX_TENSORS" ]; then
+            python llama.cpp/llama-gguf-split --split --split-max-tensors $SPLIT_MAX_TENSORS ./model.gguf ./model
+          fi
+          # 删除原始合并文件
+          rm -f ./model.gguf || true
+
+      # 8. 准备上传（构建目标仓库名称）
+      - name: Prepare target repo name
+        id: repo_name
+        run: |
+          # 提取源仓库的模型名称部分
+          MODEL_NAME=$(echo "$SOURCE_REPO" | sed 's/.*\///')
+          TARGET_REPO="${MODEL_NAME}-GGUF"
+          echo "target_repo=$TARGET_REPO" >> $GITHUB_OUTPUT
+          echo "Target repository: $TARGET_REPO"
+
+      # 9. 创建 Hugging Face 私有仓库并上传
+      - name: Create and upload to Hugging Face
+        run: |
+          pip install huggingface_hub
+          python -c "
+          import os
+          from huggingface_hub import HfApi, create_repo, upload_folder
+          from pathlib import Path
+
+          token = os.environ['HF_TOKEN']
+          target_repo = os.environ['TARGET_REPO']
+          source_repo = os.environ['SOURCE_REPO']
+
+          api = HfApi()
+
+          # 创建私有仓库（如果不存在）
+          try:
+              create_repo(
+                  repo_id=target_repo,
+                  token=token,
+                  private=True,
+                  exist_ok=True
+              )
+              print(f'Repository {target_repo} created/verified')
+          except Exception as e:
+              print(f'Repo creation: {e}')
+
+          # 生成 README.md
+          readme_content = f'''---
+          license: unknown
+          ---
+          # {target_repo}
+
+          This model is a GGUF conversion of [{source_repo}](https://huggingface.co/{source_repo}).
+
+          Quantization: {os.environ.get('QUANT_TYPE', 'F16')}
+
+          Converted using [llama.cpp](https://github.com/ggml-org/llama.cpp).
+          '''
+          with open('README.md', 'w') as f:
+              f.write(readme_content)
+
+          # 上传所有 GGUF 文件
+          upload_folder(
+              folder_path='.',
+              repo_id=target_repo,
+              token=token,
+              commit_message=f'GGUF conversion from {source_repo}',
+              ignore_patterns=['*.log', '*.py', '*.sh', 'source_model/*', 'llama.cpp/*', '.git/*']
+          )
+          print(f'Successfully uploaded to https://huggingface.co/{target_repo}')
+          "
+        env:
+          TARGET_REPO: ${{ steps.repo_name.outputs.target_repo }}
