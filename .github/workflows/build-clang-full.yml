@@ -10,7 +10,7 @@ jobs:
         shell: msys2 {0}
     steps:
       - name: Checkout llvm-project
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: llvm/llvm-project
           fetch-depth: 1
@@ -28,6 +28,8 @@ jobs:
             ninja
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-binutils
+            mingw-w64-ucrt-x86_64-python3
+            mingw-w64-ucrt-x86_64-python3-pip
 
       - name: Verify toolchain
         run: |
