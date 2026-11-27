@@ -17,7 +17,7 @@ jobs:
           path: llvm-project
           # ref: llvmorg-19.1.0  # 固定release tag，加快编译
 
-      - name: Setup MSYS2 UCRT64
+      - name: Setup MSYS2 MINGW64
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
@@ -26,10 +26,10 @@ jobs:
             git
             cmake
             ninja
-            mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-binutils
-            mingw-w64-ucrt-x86_64-python
-            mingw-w64-ucrt-x86_64-python-pip
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-binutils
+            mingw-w64-x86_64-python
+            mingw-w64-x86_64-python-pip
 
       - name: Verify toolchain
         run: |
